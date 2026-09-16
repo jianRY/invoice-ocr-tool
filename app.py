@@ -15,7 +15,7 @@ from tkinter import filedialog, messagebox, ttk
 from excel_out import export_excel
 from parser import IMG_EXTS, parse_image
 
-VERSION = "1.1.0"
+VERSION = "1.1.1"
 APP_TITLE = f"发票识别汇总工具 v{VERSION}"
 OUT_XLSX = "发票识别汇总.xlsx"
 UNKNOWN_DIR = "未识别"

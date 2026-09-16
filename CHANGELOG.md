@@ -1,5 +1,21 @@
 # 更新日志
 
+## v1.1.1（2026-09-16）
+
+**重写：站点更新脚本改为纯 bash 单文件（不再依赖 Python）**
+- `deploy/update_site.sh` 自包含，宝塔「计划任务 → Shell 脚本」里整段粘贴即可运行，服务器上不需要 Python
+- 顶部集中配置：`WEB_DIR`（网站根目录）、`MIRROR_EXE`（默认 1，镜像双 exe）、`PROXY`、`KEEP_BAK`、`KEEP_EXE`
+- 页面三源容灾（GitHub Pages → raw.githubusercontent → jsDelivr）＋ 内容校验（>3KB 且含 4 项特征标记），校验不过**拒绝覆盖**
+- exe 四源容灾（直连 GitHub → ghfast.top → ghproxy.net → gh-proxy.com），下完校验「远端大小相符 ＋ >5MB ＋ 开头 MZ」，残包或错误页直接丢弃换源
+- **只改写下载成功的那个链接**：某个 exe 失败时它在页面里保持 GitHub 原地址，不会产生死链
+- 原子替换（`.tmp` + `mv`）＋ 自动备份 5 份到 `_webbak/` ＋ 旧版 exe 自动清理（默认保留 2 个版本）
+- 幂等：同版本 exe 已存在且校验通过即跳过下载，定时任务反复跑无副作用（实测二次运行 6 秒完成）
+
+**文档**
+- `deploy/README.md` 重写为 bash 版部署说明（一步粘贴、变量表、安全属性、常见问题）
+- 展示页 FAQ 同步更新为 bash 脚本说明
+- 发版脚本 `release.py` 现在会把 `deploy/` 一并同步到交付目录，避免手工漏拷
+
 ## v1.1.0（2026-09-16）
 
 **新增：站点自动更新脚本（宝塔面板 / 任意 Linux 服务器）**
