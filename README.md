@@ -99,6 +99,7 @@ python app.py
 | `excel_out.py` | 导出「票据汇总 + 明细」双表 Excel |
 | `installer.iss` | Inno Setup 安装包脚本（由 `release.py` 调用编译） |
 | `release.py` | 一键发版：打包 → 自检 → 签名 → 安装版 → 提交推送 → 建 Release → 更新展示页 |
+| `tests/test_pdf_convert.py` | PDF 转换的场景测试（现场合成样本，36 项断言，改动该功能后先跑它） |
 | `docs/index.html` | 静态展示页（GitHub Pages），发版时自动更新版本号与下载链接 |
 | `deploy/update_site.sh` | 服务器侧脚本：定时把最新展示页与 exe 同步到自己的站点 |
 
