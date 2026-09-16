@@ -66,7 +66,24 @@ MAIN_BRANCH = "main"
 # 含 tkinter 的构建 venv（managed venv 打不出 tkinter）
 PY = r"C:/Users/toxuj/.workbuddy/binaries/python/envs/court_build_v13/Scripts/python.exe"
 PYINSTALLER = r"C:/Users/toxuj/.workbuddy/binaries/python/envs/court_build_v13/Scripts/pyinstaller.exe"
-GIT = r"C:\Users\toxuj\.workbuddy\binaries\PortableGit\versions\1.2.0\mingw64\bin\git.exe"
+def _pick_git():
+    """挑一个真能用的 git。
+
+    坑（2026-09-16 实测）：PortableGit 的 git.exe 把 git-remote-https.exe 放在
+    mingw64\\bin（不在 exec-path 里），git 靠翻 PATH 找远程 helper。本机 shell 的
+    PATH 被裁剪过，PortableGit 的 bin 不一定在里面 —— 于是 push 报
+    `git: 'remote-https' is not a git command`；就算把 PATH 补上也只是变成
+    **静默失败**（returncode 128、零输出），更难看懂。
+    系统 Git（2.55）helper 布局正常，实测可直接推送，所以优先用它。
+    """
+    for c in (r"C:\Program Files\Git\cmd\git.exe",
+              r"C:\Program Files (x86)\Git\cmd\git.exe"):
+        if os.path.exists(c):
+            return c
+    return r"C:\Users\toxuj\.workbuddy\binaries\PortableGit\versions\1.2.0\mingw64\bin\git.exe"
+
+
+GIT = _pick_git()
 WCRED = r"C:\Users\toxuj\.workbuddy\binaries\PortableGit\versions\1.2.0\mingw64\bin\git-credential-wincred.exe"
 SIGN_PY = r"D:\workbuddy\诉讼案件网站\.pybuild_cache\signing\sign.py"
 PROXY = "http://127.0.0.1:10808"
