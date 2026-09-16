@@ -1,0 +1,26 @@
+# 构建缓存与产物（不入库）
+.pybuild_cache/
+dist/
+dist_*/
+bld/
+bld[0-9]*/
+build/
+*.spec
+__pycache__/
+*.pyc
+innosetup/
+innosetup*.exe
+innosetup*.zip
+_setup_tmp.iss
+
+# 凭据绝不入库
+token.txt
+*.token
+*.pfx
+*.pvk
+
+# 运行时 / 测试产物
+发票识别汇总.xlsx
+未识别/
+_pid.txt
+tests/_out/
