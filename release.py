@@ -416,10 +416,12 @@ def copy_delivery(onefile, installer, ver):
     pairs = [(onefile, "%s-单文件版.exe" % APP_NAME)]
     if installer:
         pairs.append((installer, "%s-安装版.exe" % APP_NAME))
+    sizes = []
     for src, nm in pairs:
         if src and os.path.exists(src):
             dst = os.path.join(DELIVERY, nm)
             shutil.copy2(src, dst)
+            sizes.append(os.path.getsize(dst) / 1048576.0)
             log("交付 -> %s" % dst)
     if os.path.exists(INDEX_HTML):
         shutil.copy2(INDEX_HTML, os.path.join(DELIVERY, "展示页.html"))
@@ -434,6 +436,19 @@ def copy_delivery(onefile, installer, ver):
             if os.path.exists(f):
                 shutil.copy2(f, os.path.join(dep_dst, nm))
         log("交付 -> %s（update_site.sh / update_site.py / README.md）" % dep_dst)
+    # 使用说明.txt：版本号与 exe 体积自动跟着发版走，避免手工漏改
+    manual = os.path.join(DELIVERY, "使用说明.txt")
+    if os.path.exists(manual):
+        t = open(manual, encoding="utf-8").read()
+        t2 = re.sub(r"^发票识别汇总工具 v[\d.]+ 使用说明",
+                    "发票识别汇总工具 v%s 使用说明" % ver, t, count=1, flags=re.M)
+        t2 = re.sub(r"^v[\d.]+(\s+)\d{4}-\d{2}-\d{2}",
+                    "v%s\\g<1>" % ver + time.strftime("%Y-%m-%d"), t2, count=1, flags=re.M)
+        it = iter("%.1f MB" % s for s in sizes)
+        t2 = re.sub(r"[\d.]+ MB", lambda m: next(it, m.group(0)), t2, count=len(sizes))
+        if t2 != t:
+            open(manual, "w", encoding="utf-8", newline="").write(t2)
+            log("交付 -> 使用说明.txt（已刷到 v%s）" % ver)
 
 
 # ---------------- 主流程 ----------------
