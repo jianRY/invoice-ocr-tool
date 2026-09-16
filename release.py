@@ -96,6 +96,20 @@ def run(cmd, cwd=None, check=True, env=None):
     return p
 
 
+def git_env():
+    """git 子进程环境：把 PortableGit 的 mingw64\\bin 补进 PATH。
+
+    这个 git 是便携版，它把 git-remote-https.exe 放在 mingw64\\bin 下（不在
+    exec-path 里），git 找远程 helper 时会翻 PATH。外部 PATH 被裁剪过
+    （本环境 shell 的 PATH 常缺 Git 目录）时就报
+    `git: 'remote-https' is not a git command`，push 直接失败。
+    显式补上，别依赖调用方的 PATH。
+    """
+    e = dict(os.environ)
+    e["PATH"] = os.path.dirname(GIT) + os.pathsep + e.get("PATH", "")
+    return e
+
+
 # ---------------- 版本号 ----------------
 def read_version():
     s = open(APP_PY, encoding="utf-8").read()
@@ -434,7 +448,7 @@ def upload_asset(token, rid, path, name):
 
 # ---------------- git ----------------
 def git(*args, check=True):
-    return run([GIT] + list(args), cwd=ROOT, check=check)
+    return run([GIT] + list(args), cwd=ROOT, check=check, env=git_env())
 
 
 def git_commit_tag_push(ver, token):
@@ -452,11 +466,11 @@ def git_commit_tag_push(ver, token):
     try:
         url = "https://x-access-token:%s@github.com/%s.git" % (token, OWNER_REPO)
         print("   $ git push <token>@github.com/%s.git %s v%s" % (OWNER_REPO, MAIN_BRANCH, ver))
-        p = run([GIT, "push", url, MAIN_BRANCH], check=False)
+        p = run([GIT, "push", url, MAIN_BRANCH], check=False, env=git_env())
         if p.returncode != 0:
             print(re.sub(r"x-access-token:[^@\s]+@", "x-access-token:***@", p.stderr or "")[-800:])
             raise SystemExit("push 分支失败")
-        p2 = run([GIT, "push", url, "v" + ver], check=False)
+        p2 = run([GIT, "push", url, "v" + ver], check=False, env=git_env())
         if p2.returncode != 0:
             log("  !! tag v%s 推送失败（可能远端已存在），继续" % ver)
         log("  推送完成")
