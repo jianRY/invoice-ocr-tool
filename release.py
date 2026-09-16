@@ -19,9 +19,24 @@
   python release.py --no-push           # commit+tag 但只留本地
   python release.py --no-verify-page    # 跳过发版后的线上展示页校验
 
-约定（建哥 2026-09-16 指令）：本工具每次有改动均自动发布新版本，
-固定产出「单文件运行版 + 可安装版」两个 exe，并同步更新静态展示页推到 GitHub。
-服务器侧用 deploy/update_site.py 定时同步该展示页（宝塔计划任务）。
+约定（建哥 2026-09-16 指令）：本工具每次有改动均自动发布新版本，无需等指令。
+每次发版要走完下面三步（本脚本已全部固化，别绕过）：
+
+  1) 网页同步 —— 展示页内容必须与本版数据一致：版本号、两个下载链接、页脚版本
+     全部刷到新版本。服务器上的 deploy/update_site.sh（宝塔计划任务）是靠页面里的
+     `InvoiceOcrTool_v<版本>` 拼出 Release 文件名去镜像 exe 的，所以
+     「页面版本号 == git tag == Release 资产名版本」三者必须严格一致；
+     有一个没跟上，宝塔脚本就会去下不存在的文件（404 后保留 GitHub 原链接）。
+     update_page() 的硬校验（残留旧版本号即中止发版）就是守这条线，不要删。
+
+  2) 双 exe 且都要自签名 —— 每次固定产出「单文件运行版 + 可安装版」两个 exe，
+     打包后一律用 jianRY 证书签名（SHA256 + 时间戳），未签名的产物不发。
+
+  3) 发版推送 —— commit + tag + push 到 GitHub、建 Release 并上传两个 exe
+     （资产名 ASCII：InvoiceOcrTool_vX.Y.Z.exe / _setup.exe）；
+     版本号按实际情况递增：小改 --bump patch、新功能 --bump minor、大改 --bump major。
+
+服务器侧用 deploy/update_site.sh（纯 bash 单文件）定时同步展示页并镜像双 exe。
 """
 import argparse
 import datetime
@@ -259,6 +274,45 @@ def update_page(ver):
     return True
 
 
+def check_page_names(html, ver):
+    """校验页面里出现的下载文件名就是本版资产名。
+
+    服务器上的 deploy/update_site.sh 是按页面里的 `InvoiceOcrTool_v<版本>`
+    拼出 releases/latest/download/<名字> 去镜像 exe 的；页面名字与 Release 资产名
+    对不上就会 404，而且表现是"静默退回 GitHub 原链接"，不报错、极易漏掉。
+    """
+    want = {"InvoiceOcrTool_v%s.exe" % ver, "InvoiceOcrTool_v%s_setup.exe" % ver}
+    got = set(re.findall(r"InvoiceOcrTool_v[\d.]+(?:_setup)?\.exe", html))
+    if got == want:
+        log("页面下载文件名与资产名一致：%s" % "、".join(sorted(got)))
+        return True
+    log("!! 页面里的下载文件名与本版不一致 —— 页面 %s / 期望 %s"
+        % (sorted(got) or ["无"], sorted(want)))
+    log("   宝塔脚本会按页面版本拼文件名，不一致会导致镜像失败（退回 GitHub 链接）")
+    return False
+
+
+def verify_assets(ver, rid, token, pairs):
+    """硬校验：Release 上的资产名与大小必须与本地产物一致，不一致直接中止。
+
+    这是「保证宝塔脚本能自动更新到新版网页」的关键一环 ——
+    名字错一个字节，服务器那边就是 404，而且不报错。
+    """
+    d = json.load(api("/repos/%s/releases/%s/assets" % (OWNER_REPO, rid), token))
+    have = {a["name"]: a["size"] for a in d}
+    bad = []
+    for path, name in pairs:
+        if name not in have:
+            bad.append("缺少资产 %s" % name)
+        elif os.path.exists(path) and have[name] != os.path.getsize(path):
+            bad.append("资产 %s 大小不符（线上 %d / 本地 %d）"
+                       % (name, have[name], os.path.getsize(path)))
+    if bad:
+        raise SystemExit("Release 资产校验失败：\n  " + "\n  ".join(bad))
+    log("Release 资产校验通过：%s" % "、".join(n for _, n in pairs))
+    return set(have)
+
+
 def verify_page(ver, wait=180):
     """发版后校验线上 GitHub Pages 是否已生效（Pages 重建需要时间）。失败只告警。"""
     url = "https://jianry.github.io/invoice-ocr-tool/"
@@ -276,6 +330,7 @@ def verify_page(ver, wait=180):
             got = sorted(page_versions(html))
             if got == [ver]:
                 log("线上展示页已更新到 v%s（耗时 %.0fs）" % (ver, time.time() - t0))
+                check_page_names(html, ver)
                 return True
             log("  线上版本为 %s，等待 Pages 重建…" % (got or ["?"]))
         except Exception as e:
@@ -511,13 +566,18 @@ def main():
         return
 
     rid = create_release(token, ver, changelog_section(ver))
-    ok = upload_asset(token, rid, onefile, "InvoiceOcrTool_v%s.exe" % ver)
+    pairs = [(onefile, "InvoiceOcrTool_v%s.exe" % ver)]
     if installer and os.path.exists(installer):
-        ok = upload_asset(token, rid, installer, "InvoiceOcrTool_v%s_setup.exe" % ver) and ok
+        pairs.append((installer, "InvoiceOcrTool_v%s_setup.exe" % ver))
+    ok = upload_asset(token, rid, pairs[0][0], pairs[0][1])
+    for path, name in pairs[1:]:
+        ok = upload_asset(token, rid, path, name) and ok
     log("Release 页面：%s/releases/tag/v%s" % (REPO_URL, ver))
     log("展示页：https://jianry.github.io/invoice-ocr-tool/")
     if not ok:
         raise SystemExit("有资产上传失败，请重跑 --no-build 补传")
+    # 硬校验资产名与大小：宝塔脚本按名拼下载地址，错了会静默失效
+    verify_assets(ver, rid, token, pairs)
 
     # 3) 校验线上展示页已同步（Pages 重建需要时间，失败只告警）
     if not args.no_verify_page:
