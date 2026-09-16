@@ -276,10 +276,10 @@
         </svg>
         本地离线 OCR · 图片不出本机
       </span>
-      <h1>票据图片丢进文件夹，<br><span class="hl">一键变成 Excel 汇总表</span></h1>
+      <h1>票据图片、PDF 丢进文件夹，<br><span class="hl">一键变成 Excel 汇总表</span></h1>
       <p class="sub">
         自动识别发票号码、开票日期、购销双方、明细项目与价税合计；
-        识别不出的图片自动归入「未识别」文件夹，原图分毫不动。
+        PDF 会先逐页转成图片再识别，识别不出的一律归入「未识别」文件夹，原件分毫不动。
       </p>
       <div class="cta">
         <a class="btn btn-primary" href="#download">
@@ -306,7 +306,7 @@
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M20 6L9 17l-5-5"/>
           </svg>
-          当前版本 <b id="appVer" style="font-weight:700">v1.1.2</b>
+          当前版本 <b id="appVer" style="font-weight:700">v1.2.0</b>
         </span>
         <span>
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -323,7 +323,7 @@
         <span class="dot" style="background:#F5A5A0"></span>
         <span class="dot" style="background:#F5D6A0"></span>
         <span class="dot" style="background:#A8D8B0"></span>
-        <span class="mock-title">发票识别汇总工具 v1.1.2</span>
+        <span class="mock-title">发票识别汇总工具 v1.2.0</span>
       </div>
       <div class="mock-body">
         <div class="mock-row">
@@ -356,6 +356,23 @@
       <p>把手工抄录的工作量，压缩成点一次按钮</p>
     </div>
     <div class="cards">
+      <div class="card" style="grid-column:1/-1">
+        <div style="display:flex; gap:22px; align-items:flex-start; flex-wrap:wrap">
+          <div class="ico" style="margin-bottom:0">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#1F4E79" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M9 15h6M9 18h4"/>
+            </svg>
+          </div>
+          <div style="flex:1; min-width:280px">
+            <h3>PDF 自动转成图片再识别</h3>
+            <p>文件夹里有 PDF，工具会先逐页渲染成 JPG（命名 <b>原文件名_页码.jpg</b>）再识别，与原有图片一起处理。原始 PDF 分毫不动。</p>
+            <p style="margin-top:10px">
+              <b>全是图片</b> → 跳过这一步，行为与以前完全一样；
+              <b>纯 PDF 或图文混装</b> → 新建 <b>处理后</b> 文件夹，转换出的页图与原有图片都放进去，Excel 与「未识别」也生成在里面。
+            </p>
+          </div>
+        </div>
+      </div>
       <div class="card">
         <div class="ico">
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#1F4E79" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -425,22 +442,23 @@
     <div class="steps">
       <div class="step">
         <div class="step-n">1</div>
-        <h3>把图片放进一个文件夹</h3>
-        <p>拍照的、扫描的、导出的电子发票，混着放都行。</p>
+        <h3>把票据放进一个文件夹</h3>
+        <p>拍照的、扫描的、导出的电子发票，甚至 PDF，混着放都行。</p>
       </div>
       <div class="step">
         <div class="step-n">2</div>
         <h3>选文件夹，点「开始识别」</h3>
-        <p>工具逐张识别，进度条实时推进，中途可随时查看结果表。</p>
+        <p>有 PDF 会先转成图片（进度条显示"准备文件…"），随后逐张识别。</p>
       </div>
       <div class="step">
         <div class="step-n">3</div>
         <h3>拿结果</h3>
-        <p>文件夹里出现 <b>发票识别汇总.xlsx</b>，以及等待人工处理的 <b>未识别\</b> 文件夹。</p>
+        <p>出现 <b>发票识别汇总.xlsx</b> 与等待人工处理的 <b>未识别\</b>；有 PDF 时它们在 <b>处理后</b> 文件夹内。</p>
       </div>
     </div>
     <div class="note">
-      <b>识别判定：</b>发票号码、价税合计、明细项目三者缺一即判为「未识别」。多页票据（如住院费用清单附件页）按单张图片处理，附件页通常会被归入「未识别」，建议人工补录。
+      <b>识别判定：</b>发票号码、价税合计、明细项目三者缺一即判为「未识别」。多页票据（如住院费用清单附件页）按单张图片处理，附件页通常会被归入「未识别」，建议人工补录。<br>
+      <b>PDF 说明：</b>转换是幂等的，重复运行不会产生重复副本；加密或损坏的 PDF 无法转换，会被复制到「未识别」文件夹并给出原因。
     </div>
   </div>
 </section>
@@ -505,8 +523,8 @@
           单文件版
         </h3>
         <p>双击即用，免安装。适合放 U 盘或随手丢在桌面。</p>
-        <div class="fn">InvoiceOcrTool_v1.1.2.exe</div>
-        <a class="btn btn-primary" href="https://github.com/jianRY/invoice-ocr-tool/releases/latest/download/InvoiceOcrTool_v1.1.2.exe">
+        <div class="fn">InvoiceOcrTool_v1.2.0.exe</div>
+        <a class="btn btn-primary" href="https://github.com/jianRY/invoice-ocr-tool/releases/latest/download/InvoiceOcrTool_v1.2.0.exe">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/>
           </svg>
@@ -521,8 +539,8 @@
           安装版
         </h3>
         <p>标准安装向导，带开始菜单 / 桌面快捷方式，可在「已安装的应用」中卸载。</p>
-        <div class="fn">InvoiceOcrTool_v1.1.2_setup.exe</div>
-        <a class="btn btn-ghost" href="https://github.com/jianRY/invoice-ocr-tool/releases/latest/download/InvoiceOcrTool_v1.1.2_setup.exe">
+        <div class="fn">InvoiceOcrTool_v1.2.0_setup.exe</div>
+        <a class="btn btn-ghost" href="https://github.com/jianRY/invoice-ocr-tool/releases/latest/download/InvoiceOcrTool_v1.2.0_setup.exe">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/>
           </svg>
@@ -564,6 +582,12 @@
         <p>常见原因有三种：图片过于模糊或倾斜导致 OCR 失败；该图是住院费用清单等附件页、本身不含发票号码与价税合计；票面结构与已支持的类型差异过大。这些图片会被复制到「未识别」文件夹，方便人工补录，不会混进汇总表。</p>
       </details>
       <details>
+        <summary>我的票据是 PDF，能直接识别吗？
+          <svg class="chev" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#7B8A99" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+        </summary>
+        <p>可以。文件夹里有 PDF 时会先逐页转成图片（命名 <b>原文件名_页码.jpg</b>）再识别，原始 PDF 不会被改动。若同时有图片，会新建 <b>处理后</b> 文件夹，把转换出的页图与原有图片一起复制进去，Excel 与「未识别」也生成在里面；如果全是图片，这一步自动跳过。界面上的「自动把 PDF 转成图片」开关可随时取消。</p>
+      </details>
+      <details>
         <summary>汇总表里「项目金额合计」和「价税合计」为什么不相等？
           <svg class="chev" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#7B8A99" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
         </summary>
@@ -594,7 +618,7 @@
 
 <footer>
   <div class="wrap">
-    发票识别汇总工具 · 当前版本 <span class="ver">v1.1.2</span> ·
+    发票识别汇总工具 · 当前版本 <span class="ver">v1.2.0</span> ·
     <a href="https://github.com/jianRY/invoice-ocr-tool" target="_blank" rel="noopener">GitHub 仓库</a> ·
     <a href="https://github.com/jianRY/invoice-ocr-tool/blob/main/CHANGELOG.md" target="_blank" rel="noopener">更新日志</a>
     <div style="margin-top:9px; font-size:12.6px">本地离线运行 · 图片不出本机</div>
