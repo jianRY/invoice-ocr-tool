@@ -177,9 +177,13 @@ def sign(exe, title):
         return False
     log("签名：%s" % os.path.basename(exe))
     p = run([PY, SIGN_PY, exe, title, REPO_URL], check=False)
-    ok = "Valid" in (p.stdout or "") or p.returncode == 0
+    out = (p.stdout or "") + "\n" + (p.stderr or "")
+    ok = p.returncode == 0 and "签名完成" in out
     if not ok:
-        print((p.stdout or "")[-800:])
+        print(out[-900:])
+        log("!! 签名未成功，继续发布（请检查证书）")
+    else:
+        log("  签名 ok")
     return ok
 
 
@@ -188,15 +192,22 @@ def build_installer(ver):
     if not iscc:
         log("!! 未找到 ISCC.exe，跳过安装版")
         return None
+    payload = os.path.join(DIST, "onedir", "InvoiceOcrTool")
+    if not os.path.exists(os.path.join(payload, "InvoiceOcrTool.exe")):
+        log("!! 目录版负载不存在（%s），跳过安装版" % payload)
+        return None
     log("编译安装版…")
-    out = os.path.join(DIST, "installer")
-    os.makedirs(out, exist_ok=True)
+    outdir = os.path.join(DIST, "installer")
+    os.makedirs(outdir, exist_ok=True)
     iss = os.path.join(ROOT, "installer.iss")
-    p = run([iscc, "/DMyAppVersion=%s" % ver, "/O" + out, iss], cwd=ROOT, check=False)
+    p = run([iscc, "/DMyAppVersion=%s" % ver, "/O" + outdir, iss], cwd=ROOT, check=False)
     name = "InvoiceOcrTool_v%s_setup.exe" % ver
-    exe = os.path.join(out, name)
+    exe = os.path.join(outdir, name)
     if not os.path.exists(exe):
-        print((p.stdout or "")[-2000:])
+        txt = (p.stdout or "") + "\n" + (p.stderr or "")
+        errs = [l for l in txt.splitlines()
+                if re.search(r"error|Error|Error |not found|cannot|Cannot|无效|找不到", l)]
+        print("\n".join(errs[-14:]) if errs else txt[-1500:])
         log("!! 安装版编译失败，继续发单文件版")
         return None
     log("安装版完成：%.1f MB" % (os.path.getsize(exe) / 1048576))
@@ -278,6 +289,17 @@ def create_release(token, ver, body):
 def upload_asset(token, rid, path, name):
     size = os.path.getsize(path)
     log("上传资产 %s（%.1f MB）…" % (name, size / 1048576))
+    # 同名资产先删除，保证脚本可重入
+    try:
+        d = json.load(api("/repos/%s/releases/%s/assets" % (OWNER_REPO, rid), token))
+        for a in d:
+            if a["name"] == name:
+                r = api("/repos/%s/releases/assets/%s" % (OWNER_REPO, a["id"]),
+                        token, method="DELETE")
+                r.read()
+                log("  已删除同名旧资产 %s" % name)
+    except Exception as e:
+        log("  同名资产检查失败（忽略）：%s" % e)
     proxy = urllib.request.ProxyHandler({"http": PROXY, "https": PROXY})
     op = urllib.request.build_opener(proxy)
     with open(path, "rb") as f:
@@ -318,10 +340,13 @@ def git_commit_tag_push(ver, token):
     try:
         url = "https://x-access-token:%s@github.com/%s.git" % (token, OWNER_REPO)
         print("   $ git push <token>@github.com/%s.git %s v%s" % (OWNER_REPO, MAIN_BRANCH, ver))
-        p = run([GIT, "push", url, MAIN_BRANCH, "v" + ver], check=False)
+        p = run([GIT, "push", url, MAIN_BRANCH], check=False)
         if p.returncode != 0:
-            print((p.stderr or "")[-800:])
-            raise SystemExit("push 失败")
+            print(re.sub(r"x-access-token:[^@\s]+@", "x-access-token:***@", p.stderr or "")[-800:])
+            raise SystemExit("push 分支失败")
+        p2 = run([GIT, "push", url, "v" + ver], check=False)
+        if p2.returncode != 0:
+            log("  !! tag v%s 推送失败（可能远端已存在），继续" % ver)
         log("  推送完成")
     finally:
         git("config", "--unset", "http.proxy", check=False)

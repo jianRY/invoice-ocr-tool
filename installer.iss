@@ -60,7 +60,7 @@ ButtonBrowse=浏览(&R)…
 Name: "desktopicon"; Description: "创建桌面快捷方式(&D)"; GroupDescription: "附加任务："
 
 [Files]
-Source: "dist\InvoiceOcrTool\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "dist\onedir\InvoiceOcrTool\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
