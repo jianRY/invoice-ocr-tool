@@ -424,6 +424,16 @@ def copy_delivery(onefile, installer, ver):
     if os.path.exists(INDEX_HTML):
         shutil.copy2(INDEX_HTML, os.path.join(DELIVERY, "展示页.html"))
         log("交付 -> %s" % os.path.join(DELIVERY, "展示页.html"))
+    # 部署脚本一并交付（宝塔服务器用），避免每次手工同步漏掉
+    dep_src = os.path.join(ROOT, "deploy")
+    dep_dst = os.path.join(DELIVERY, "宝塔部署脚本")
+    if os.path.isdir(dep_src):
+        os.makedirs(dep_dst, exist_ok=True)
+        for nm in ("update_site.sh", "update_site.py", "README.md"):
+            f = os.path.join(dep_src, nm)
+            if os.path.exists(f):
+                shutil.copy2(f, os.path.join(dep_dst, nm))
+        log("交付 -> %s（update_site.sh / update_site.py / README.md）" % dep_dst)
 
 
 # ---------------- 主流程 ----------------
