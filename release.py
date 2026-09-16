@@ -17,9 +17,11 @@
   python release.py --no-build          # 复用现有 exe，只做发布动作
   python release.py --no-installer      # 只发单文件版
   python release.py --no-push           # commit+tag 但只留本地
+  python release.py --no-verify-page    # 跳过发版后的线上展示页校验
 
 约定（建哥 2026-09-16 指令）：本工具每次有改动均自动发布新版本，
-固定产出「单文件运行版 + 可安装版」两个 exe，并同步更新静态展示页。
+固定产出「单文件运行版 + 可安装版」两个 exe，并同步更新静态展示页推到 GitHub。
+服务器侧用 deploy/update_site.py 定时同步该展示页（宝塔计划任务）。
 """
 import argparse
 import datetime
@@ -215,18 +217,73 @@ def build_installer(ver):
 
 
 # ---------------- 展示页 ----------------
+def page_versions(html):
+    """提取页面里所有版本号标记（文件名 / 正文 / 页脚 / 窗口标题）。"""
+    pats = [
+        r"_v(\d+\.\d+\.\d+)",                                     # 资产文件名
+        r'id="appVer"[^>]*>\s*v?(\d+\.\d+\.\d+)',                 # Hero 当前版本
+        r'<span class="ver">\s*v?(\d+\.\d+\.\d+)',                # 页脚版本
+        r'<span class="mock-title">[^<]*?v(\d+\.\d+\.\d+)',       # 窗口标题栏
+    ]
+    found = set()
+    for p in pats:
+        found.update(re.findall(p, html))
+    return found
+
+
 def update_page(ver):
+    """把展示页的版本号与下载链接刷到 ver；替换不生效则中止发版（不再静默通过）。"""
     if not os.path.exists(INDEX_HTML):
-        return
-    s = open(INDEX_HTML, encoding="utf-8").read()
+        raise SystemExit("找不到展示页 %s，无法同步更新" % INDEX_HTML)
+    s0 = open(INDEX_HTML, encoding="utf-8").read()
+    s = s0
     s = re.sub(r"InvoiceOcrTool_v[\d.]+(_setup)?\.exe",
                lambda m: "InvoiceOcrTool_v%s%s.exe" % (ver, m.group(1) or ""), s)
-    s = re.sub(r'(id="appVer"[^>]*>)v[\d.]+(</span>)', r"\g<1>v%s\g<2>" % ver, s)
-    s = re.sub(r'(<span class="ver">)v[\d.]+(</span>)', r"\g<1>v%s\g<2>" % ver, s)
-    s = re.sub(r'(<span class="mock-title">%s )v[\d.]+(</span>)' % APP_NAME,
-               r"\g<1>v%s\g<2>" % ver, s)
-    open(INDEX_HTML, "w", encoding="utf-8").write(s)
-    log("展示页已更新到 v%s" % ver)
+    s = re.sub(r'(id="appVer"[^>]*>)v[\d.]+', r"\g<1>v%s" % ver, s)
+    s = re.sub(r'(<span class="ver">)v[\d.]+', r"\g<1>v%s" % ver, s)
+    s = re.sub(r'(<span class="mock-title">%s )v[\d.]+' % APP_NAME,
+               r"\g<1>v%s" % ver, s)
+
+    # 硬校验：页面上出现的每一处版本号都必须是新版本
+    if 'id="appVer"' not in s:
+        raise SystemExit("展示页缺少 id=\"appVer\" 标记，页面结构可能已改动")
+    stale = sorted(page_versions(s) - {ver})
+    if stale:
+        raise SystemExit("展示页仍残留旧版本号 %s，已中止发版（请检查 docs/index.html 的版本标记）"
+                         % stale)
+    if s == s0:
+        log("展示页无变化（已是 v%s）" % ver)
+    else:
+        open(INDEX_HTML, "w", encoding="utf-8").write(s)
+        log("展示页已更新到 v%s" % ver)
+    return True
+
+
+def verify_page(ver, wait=180):
+    """发版后校验线上 GitHub Pages 是否已生效（Pages 重建需要时间）。失败只告警。"""
+    url = "https://jianry.github.io/invoice-ocr-tool/"
+    t0 = time.time()
+    log("校验线上展示页（最多等 %ds）…" % wait)
+    while time.time() - t0 < wait:
+        try:
+            proxy = urllib.request.ProxyHandler({"http": PROXY, "https": PROXY})
+            op = urllib.request.build_opener(proxy)
+            req = urllib.request.Request(
+                url + "?nocache=%d" % int(time.time()),
+                headers={"User-Agent": "curl/8", "Cache-Control": "no-cache"})
+            with op.open(req, timeout=30) as r:
+                html = r.read().decode("utf-8", "replace")
+            got = sorted(page_versions(html))
+            if got == [ver]:
+                log("线上展示页已更新到 v%s（耗时 %.0fs）" % (ver, time.time() - t0))
+                return True
+            log("  线上版本为 %s，等待 Pages 重建…" % (got or ["?"]))
+        except Exception as e:
+            log("  校验请求失败：%s" % e)
+        time.sleep(20)
+    log("!! 线上展示页在 %ds 内未更新到 v%s（Pages 构建可能较慢，请稍后访问确认）" % (wait, ver))
+    return False
+
 
 
 # ---------------- GitHub ----------------
@@ -364,6 +421,9 @@ def copy_delivery(onefile, installer, ver):
             dst = os.path.join(DELIVERY, nm)
             shutil.copy2(src, dst)
             log("交付 -> %s" % dst)
+    if os.path.exists(INDEX_HTML):
+        shutil.copy2(INDEX_HTML, os.path.join(DELIVERY, "展示页.html"))
+        log("交付 -> %s" % os.path.join(DELIVERY, "展示页.html"))
 
 
 # ---------------- 主流程 ----------------
@@ -375,6 +435,8 @@ def main():
     ap.add_argument("--no-build", action="store_true", help="复用现有 exe")
     ap.add_argument("--no-installer", action="store_true")
     ap.add_argument("--no-push", action="store_true")
+    ap.add_argument("--no-verify-page", action="store_true", help="跳过发版后的线上展示页校验")
+    ap.add_argument("--verify-wait", type=int, default=180, help="线上展示页校验等待秒数（默认 180）")
     ap.add_argument("--allow-missing-notes", action="store_true")
     args = ap.parse_args()
 
@@ -408,8 +470,9 @@ def main():
     else:
         installer = os.path.join(DIST, "installer", "InvoiceOcrTool_v%s_setup.exe" % ver)
 
-    copy_delivery(onefile, installer, ver)
+    # 展示页先刷新，再复制到交付目录（保证离线副本与线上一致）
     update_page(ver)
+    copy_delivery(onefile, installer, ver)
 
     if args.dry_run:
         log("--dry-run：不提交、不推送、不发 Release。产物在 dist/")
@@ -430,6 +493,10 @@ def main():
     log("展示页：https://jianry.github.io/invoice-ocr-tool/")
     if not ok:
         raise SystemExit("有资产上传失败，请重跑 --no-build 补传")
+
+    # 3) 校验线上展示页已同步（Pages 重建需要时间，失败只告警）
+    if not args.no_verify_page:
+        verify_page(ver, args.verify_wait)
 
 
 if __name__ == "__main__":
