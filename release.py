@@ -103,9 +103,12 @@ def log(msg):
     print(">> " + msg, flush=True)
 
 
-def run(cmd, cwd=None, check=True, env=None):
-    p = subprocess.run(cmd, cwd=cwd or ROOT, capture_output=True, text=True,
-                       encoding="utf-8", errors="replace", env=env)
+def run(cmd, cwd=None, check=True, env=None, timeout=None):
+    try:
+        p = subprocess.run(cmd, cwd=cwd or ROOT, capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", env=env, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise SystemExit("命令超时(%ss)：%s" % (timeout, cmd[0]))
     if check and p.returncode != 0:
         print((p.stdout or "")[-1500:])
         print((p.stderr or "")[-1500:])
@@ -158,6 +161,21 @@ def bump(ver, kind):
 
 
 # ---------------- 构建 ----------------
+def build_env():
+    """打包/签名子进程用的环境：剥掉外部注入的 PYTHONPATH。
+
+    开发沙箱（WorkBuddy 等）会通过 PYTHONPATH 注入 sitecustomize.py，给
+    shutil.rmtree / os.remove 挂上「安全删除」钩子。PyInstaller 覆盖 dist 里的
+    旧产物时会踩到钩子，于是**打包静默失败、留下上一版 exe**，而脚本还以为是
+    新包（症状：体积和上版一模一样、时间戳是旧的）。
+    剥掉 PYTHONPATH 后子进程不再加载那层钩子，PyInstaller 行为与命令行直跑一致。
+    """
+    e = dict(os.environ)
+    for k in ("PYTHONPATH", "PYTHONSTARTUP"):
+        e.pop(k, None)
+    return e
+
+
 def fresh_dir(name):
     d = os.path.join(CACHE, "%s_%s" % (name, time.strftime("%Y%m%d_%H%M%S")))
     if os.path.exists(d):
@@ -176,19 +194,25 @@ def build_onefile():
     bld = fresh_dir("bld_onefile")
     dist = os.path.join(DIST, "onefile")
     os.makedirs(dist, exist_ok=True)
-    cmd = [PYINSTALLER, "--onefile", "--windowed", "--noupx", "--name", "InvoiceOcrTool",
+    cmd = [PYINSTALLER, "--onefile", "--windowed", "--noupx", "--noconfirm",
+           "--name", "InvoiceOcrTool",
            "--collect-all", "rapidocr_onnxruntime", "--collect-all", "onnxruntime",
+           "--collect-all", "pymupdf",
            "--distpath", dist, "--workpath", bld, "--specpath", bld]
     ico = icon_path()
     if ico:
         cmd += ["--icon", ico]
     cmd.append(os.path.join(ROOT, "app.py"))
-    p = run(cmd, cwd=ROOT, check=False)
     exe = os.path.join(dist, "InvoiceOcrTool.exe")
-    if not os.path.exists(exe):
-        print((p.stdout or "")[-2000:])
-        print((p.stderr or "")[-2000:])
-        raise SystemExit("单文件版构建失败")
+    t0 = time.time()
+    p = run(cmd, cwd=ROOT, check=False, env=build_env())
+    if p.returncode != 0 or not os.path.exists(exe):
+        print((p.stdout or "")[-3000:])
+        print((p.stderr or "")[-3000:])
+        raise SystemExit("单文件版构建失败（PyInstaller 返回码 %s）" % p.returncode)
+    if os.path.getmtime(exe) < t0 - 2:
+        print((p.stdout or "")[-3000:])
+        raise SystemExit("单文件版产物是旧的（PyInstaller 未真正重建），中止发布")
     size = os.path.getsize(exe) / 1048576
     log("单文件版完成：%.1f MB" % size)
     if size < 60:
@@ -201,22 +225,56 @@ def build_onedir():
     bld = fresh_dir("bld_onedir")
     dist = os.path.join(DIST, "onedir")
     os.makedirs(dist, exist_ok=True)
-    cmd = [PYINSTALLER, "--onedir", "--windowed", "--noupx", "--name", "InvoiceOcrTool",
+    cmd = [PYINSTALLER, "--onedir", "--windowed", "--noupx", "--noconfirm",
+           "--name", "InvoiceOcrTool",
            "--collect-all", "rapidocr_onnxruntime", "--collect-all", "onnxruntime",
+           "--collect-all", "pymupdf",
            "--distpath", dist, "--workpath", bld, "--specpath", bld]
     ico = icon_path()
     if ico:
         cmd += ["--icon", ico]
     cmd.append(os.path.join(ROOT, "app.py"))
-    p = run(cmd, cwd=ROOT, check=False)
     d = os.path.join(dist, "InvoiceOcrTool")
-    if not os.path.exists(os.path.join(d, "InvoiceOcrTool.exe")):
-        print((p.stdout or "")[-2000:])
-        raise SystemExit("目录版构建失败")
+    t0 = time.time()
+    p = run(cmd, cwd=ROOT, check=False, env=build_env())
+    target = os.path.join(d, "InvoiceOcrTool.exe")
+    if p.returncode != 0 or not os.path.exists(target):
+        print((p.stdout or "")[-3000:])
+        print((p.stderr or "")[-3000:])
+        raise SystemExit("目录版构建失败（PyInstaller 返回码 %s）" % p.returncode)
+    if os.path.getmtime(target) < t0 - 2:
+        print((p.stdout or "")[-3000:])
+        raise SystemExit("目录版产物是旧的（PyInstaller 未真正重建），中止发布")
     total = sum(os.path.getsize(os.path.join(r, f))
                 for r, _, fs in os.walk(d) for f in fs)
     log("目录版完成：%.1f MB" % (total / 1048576))
     return d
+
+
+def verify_exe(exe):
+    """用打包产物跑一次无界面自检，确认包内的 PDF 渲染库真的可用。
+
+    防的是「打包漏收 mupdf 运行库」这类问题：本地跑得好好的，用户装完
+    一处理 PDF 就报错。自检只验证「能启动 + 能把 PDF 转成 JPG」，不跑 OCR。
+    """
+    log("校验 exe 内置 PDF 转换能力…")
+    # 用带时间戳的新目录，不做任何删除操作：开发沙箱给 os.remove/shutil.rmtree 挂了
+    # 安全删除钩子，批量删除会直接终止进程
+    d = os.path.join(CACHE, "selftest_%s" % time.strftime("%Y%m%d_%H%M%S"))
+    os.makedirs(d, exist_ok=True)
+    gen = ("import pymupdf, os; d=r'%s'; doc=pymupdf.open(); pg=doc.new_page();"
+           "pg.insert_text((72,72),'selftest');"
+           "doc.save(os.path.join(d,'selftest.pdf')); doc.close()" % d)
+    run([PY, "-c", gen], env=build_env())
+    run([exe, "--selftest", d], cwd=d, check=False, timeout=900)
+    logf = os.path.join(d, "selftest.log")
+    text = open(logf, encoding="utf-8").read() if os.path.exists(logf) else ""
+    for line in (text.strip() or "(没有生成 selftest.log)").splitlines():
+        log("  | " + line)
+    if "RESULT=OK" not in text:
+        raise SystemExit("exe 自检未通过：包内 PDF 转换不可用，中止发版"
+                         "（确认无碍可加 --skip-exe-check）")
+    log("exe 自检通过：包内 PDF 转换可用")
 
 
 def sign(exe, title):
@@ -544,6 +602,8 @@ def main():
     ap.add_argument("--version", default=None)
     ap.add_argument("--dry-run", action="store_true", help="只打包+签名，不碰 git/远端")
     ap.add_argument("--no-build", action="store_true", help="复用现有 exe")
+    ap.add_argument("--skip-exe-check", action="store_true",
+                    help="跳过打包产物的 PDF 自检")
     ap.add_argument("--no-installer", action="store_true")
     ap.add_argument("--no-push", action="store_true")
     ap.add_argument("--no-verify-page", action="store_true", help="跳过发版后的线上展示页校验")
@@ -573,6 +633,8 @@ def main():
     if not args.no_build:
         onefile = build_onefile()
         onedir = build_onedir()
+        if not args.skip_exe_check:
+            verify_exe(onefile)
         sign(onefile, APP_NAME)
         if not args.no_installer:
             installer = build_installer(ver)
