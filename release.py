@@ -40,6 +40,7 @@
 """
 import argparse
 import datetime
+import hashlib
 import json
 import os
 import re
@@ -62,6 +63,15 @@ DELIVERY = r"D:\workbuddy\杂项\发票识别汇总工具"
 OWNER_REPO = "jianRY/invoice-ocr-tool"
 REPO_URL = "https://github.com/" + OWNER_REPO
 MAIN_BRANCH = "main"
+
+# 自有下载站（阿里云 47.116.64.26，见「下载服务器」项目）：
+#   /files/<资产名>      —— 双 exe 由服务器定时脚本从 Release 镜像过来
+#   /updates/<app>.json  —— 由本脚本生成的 docs/update.json 抄过去
+# 客户端自动更新优先读它，读不到再回退 GitHub（raw → API）。
+SITE_URL = "http://47.116.64.26:8888"
+SERVER_FILES = SITE_URL + "/files"
+APP_KEY = "ocr"
+UPDATE_JSON = os.path.join(ROOT, "docs", "update.json")
 
 # 含 tkinter 的构建 venv（managed venv 打不出 tkinter）
 PY = r"C:/Users/toxuj/.workbuddy/binaries/python/envs/court_build_v13/Scripts/python.exe"
@@ -430,6 +440,53 @@ def verify_page(ver, wait=180):
 
 
 
+# ---------------- 更新元数据（客户端自动更新用） ----------------
+def _sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def write_update_json(ver, onefile, installer):
+    """生成 docs/update.json —— 客户端自动更新的数据源（随 commit 推到 Pages）。
+
+    为什么不直接让客户端查 GitHub API：
+      1) 用户反馈从 GitHub 拉包慢、易超时。客户端优先读**自有服务器**上的这份 JSON
+         （服务器定时脚本从 GitHub 抄一份过去），国内访问快得多；
+      2) 一份 JSON 同时给出「服务器直链 + GitHub 兜底直链」，客户端按序尝试，
+         服务器还没同步到本版也不影响更新；
+      3) 带 sha256，客户端下载完能校验完整性，杜绝半截包当新版装上。
+    """
+    src = onefile if (onefile and os.path.exists(onefile)) else None
+    asset = "InvoiceOcrTool_v%s.exe" % ver
+    data = {
+        "app": APP_KEY,
+        "name": APP_NAME,
+        "version": ver,
+        "asset": asset,
+        "notes": changelog_section(ver),
+        "url": "%s/%s" % (SERVER_FILES, asset),
+        "fallback_url": "%s/releases/download/v%s/%s" % (REPO_URL, ver, asset),
+        "release_url": "%s/releases/tag/v%s" % (REPO_URL, ver),
+        "site_url": SITE_URL + "/",
+        "size": os.path.getsize(src) if src else 0,
+        "sha256": _sha256(src) if src else "",
+        "published": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    if installer and os.path.exists(installer):
+        sn = os.path.basename(installer)
+        data["setup_url"] = "%s/%s" % (SERVER_FILES, sn)
+        data["setup_fallback_url"] = "%s/releases/download/v%s/%s" % (REPO_URL, ver, sn)
+    os.makedirs(os.path.dirname(UPDATE_JSON), exist_ok=True)
+    with open(UPDATE_JSON, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    log("更新元数据 -> docs/update.json（v%s，%s）"
+        % (ver, "含 sha256" if data["sha256"] else "无 sha256"))
+    return data
+
+
 # ---------------- GitHub ----------------
 def get_token():
     f = os.path.join(CACHE, "token.txt")
@@ -555,6 +612,34 @@ def git_commit_tag_push(ver, token):
 
 
 # ---------------- 交付 ----------------
+# 「下载（推荐）」置顶区块：发版时自动补/刷新，保证交付出去的使用说明永远带自有服务器地址。
+#
+# ⚠️ 区块内容里**绝不能出现 "MB" 字样**：本脚本用
+#    re.sub(r"[\d.]+ MB", …, count=len(sizes)) 刷 exe 体积，只替换前 N 处匹配；
+#    置顶块若也写了 MB，体积数字就会被刷到错的位置上去。
+SERVER_MARK = "【下载（推荐：国内直连，速度快）】"
+SERVER_BLOCK = (
+    SERVER_MARK + "\n"
+    + SITE_URL + "/\n"
+    "本站为国内服务器直链，不必访问 GitHub；GitHub 地址见文末【在线资源】。\n\n"
+)
+_SERVER_BLOCK_RE = re.compile(
+    r"^【下载（推荐[^\n]*】\n[^\n]*\n[^\n]*\n\n", re.M)
+
+
+def ensure_server_top(manual):
+    """把「下载（推荐）」区块置顶到使用说明（幂等：已存在则整块替换为最新）。"""
+    t = open(manual, encoding="utf-8").read()
+    if _SERVER_BLOCK_RE.search(t):
+        t2 = _SERVER_BLOCK_RE.sub(lambda m: SERVER_BLOCK, t, count=1)
+    else:
+        t2 = SERVER_BLOCK + t
+    if t2 != t:
+        open(manual, "w", encoding="utf-8", newline="").write(t2)
+        log("交付 -> 使用说明.txt（已置顶下载地址 %s）" % (SITE_URL + "/"))
+    return True
+
+
 def copy_delivery(onefile, installer, ver):
     os.makedirs(DELIVERY, exist_ok=True)
     pairs = [(onefile, "%s-单文件版.exe" % APP_NAME)]
@@ -593,6 +678,8 @@ def copy_delivery(onefile, installer, ver):
         if t2 != t:
             open(manual, "w", encoding="utf-8", newline="").write(t2)
             log("交付 -> 使用说明.txt（已刷到 v%s）" % ver)
+        # 置顶「下载（推荐）」区块（放最后，不受上面体积替换影响）
+        ensure_server_top(manual)
 
 
 # ---------------- 主流程 ----------------
@@ -645,6 +732,7 @@ def main():
 
     # 展示页先刷新，再复制到交付目录（保证离线副本与线上一致）
     update_page(ver)
+    write_update_json(ver, onefile, installer)
     copy_delivery(onefile, installer, ver)
 
     if args.dry_run:
@@ -665,6 +753,11 @@ def main():
     ok = upload_asset(token, rid, pairs[0][0], pairs[0][1])
     for path, name in pairs[1:]:
         ok = upload_asset(token, rid, path, name) and ok
+    # 更新元数据也作为 Release 资产上传：服务器定时脚本从
+    # releases/latest/download/update.json 抄到站点 /updates/<app>.json，
+    # 客户端自动更新优先读那份。上传失败只告警，不中止发版（客户端会退回 GitHub API）。
+    if not upload_asset(token, rid, UPDATE_JSON, "update.json"):
+        log("!! update.json 上传失败 —— 自动更新仍可用，但检查会退回 GitHub API（较慢）")
     log("Release 页面：%s/releases/tag/v%s" % (REPO_URL, ver))
     log("展示页：https://jianry.github.io/invoice-ocr-tool/")
     if not ok:
