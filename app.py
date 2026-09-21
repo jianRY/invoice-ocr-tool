@@ -16,11 +16,12 @@ import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+import autoupdate
 from excel_out import export_excel
 from parser import IMG_EXTS, parse_image
 from pdf_convert import WORK_DIR, prepare, scan as scan_files, summary as prep_summary
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 APP_TITLE = f"发票识别汇总工具 v{VERSION}"
 OUT_XLSX = "发票识别汇总.xlsx"
 UNKNOWN_DIR = "未识别"
@@ -40,6 +41,37 @@ class App:
         self.work_dir = None
         self.running = False
         self._poll()
+        # 开窗之后再动更新的事，不拖慢启动
+        self.root.after(600, self._post_start)
+
+    # ---------- 自动更新 ----------
+    def _ulog(self, m):
+        """更新模块的日志回调：只写状态栏，不弹窗（静默检查失败不打扰用户）。"""
+        try:
+            self.lbl_out.configure(text=str(m)[:64])
+        except Exception:
+            pass
+
+    def _before_install(self):
+        """新版已就位、本进程即将退出前调用：停掉后台任务，确保能退干净。"""
+        self.running = False
+
+    def _post_start(self):
+        # 上次自动更新若留下中间文件，启动时接管文件名并清理
+        try:
+            autoupdate.settle_after_update(log_fn=self._ulog)
+        except Exception:
+            pass
+        self._check_update(manual=False)
+
+    def _check_update(self, manual):
+        autoupdate.run_update_check(
+            self.root, app_name=autoupdate.APP_NAME, current_version=VERSION,
+            config_file=autoupdate.CONFIG_FILE, log_fn=self._ulog,
+            on_before_install=self._before_install, manual=manual)
+
+    def check_update(self):
+        self._check_update(manual=True)
 
     # ---------- UI ----------
     def _build_style(self):
@@ -111,11 +143,14 @@ class App:
         self.btn_open = ttk.Button(bottom, text="打开所在文件夹",
                                    command=self.open_folder, state="disabled")
         self.btn_open.pack(side="left")
+        ttk.Label(bottom, text="v" + VERSION, style="Hint.TLabel").pack(side="left", padx=(10, 0))
         self.lbl_out = ttk.Label(bottom, text="", style="Hint.TLabel")
         self.lbl_out.pack(side="left", padx=10)
         self.btn_export = ttk.Button(bottom, text="重新导出 Excel",
                                      command=self.export, state="disabled")
         self.btn_export.pack(side="right")
+        ttk.Button(bottom, text="检查更新",
+                   command=self.check_update).pack(side="right", padx=(0, 8))
 
     # ---------- actions ----------
     def pick_folder(self):
