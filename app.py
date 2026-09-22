@@ -21,7 +21,7 @@ from excel_out import export_excel
 from parser import IMG_EXTS, parse_image
 from pdf_convert import WORK_DIR, prepare, scan as scan_files, summary as prep_summary
 
-VERSION = "1.3.0"
+VERSION = "1.3.1"
 APP_TITLE = f"发票识别汇总工具 v{VERSION}"
 OUT_XLSX = "发票识别汇总.xlsx"
 UNKNOWN_DIR = "未识别"

@@ -452,12 +452,16 @@ def _sha256(path):
 def write_update_json(ver, onefile, installer):
     """生成 docs/update.json —— 客户端自动更新的数据源（随 commit 推到 Pages）。
 
-    为什么不直接让客户端查 GitHub API：
-      1) 用户反馈从 GitHub 拉包慢、易超时。客户端优先读**自有服务器**上的这份 JSON
-         （服务器定时脚本从 GitHub 抄一份过去），国内访问快得多；
-      2) 一份 JSON 同时给出「服务器直链 + GitHub 兜底直链」，客户端按序尝试，
-         服务器还没同步到本版也不影响更新；
-      3) 带 sha256，客户端下载完能校验完整性，杜绝半截包当新版装上。
+    ⚠️ 字段语义 2026-09-22 调换过，别改回去：
+      url          = GitHub Release 直链（**主源**，客户端会再展开成各加速镜像择优）
+      fallback_url = 自有服务器直链（**兜底**，只在镜像与原站都不可用时才用）
+
+    为什么从「服务器优先」调回「GitHub 优先」：
+      实测裸网直连 GitHub 只有 3.7 KB/s，而公共加速镜像能到 439 KB/s ——
+      比自有服务器（阿里云 ECS 固定带宽，445 KB/s 封顶）不慢，还不用维护同步。
+    调换后新旧客户端都能正确工作：两边都是「按 url → fallback_url 顺序试」。
+
+    另带 sha256 / size，客户端下载完校验完整性，杜绝半截包当新版装上。
     """
     src = onefile if (onefile and os.path.exists(onefile)) else None
     asset = "InvoiceOcrTool_v%s.exe" % ver
@@ -467,8 +471,8 @@ def write_update_json(ver, onefile, installer):
         "version": ver,
         "asset": asset,
         "notes": changelog_section(ver),
-        "url": "%s/%s" % (SERVER_FILES, asset),
-        "fallback_url": "%s/releases/download/v%s/%s" % (REPO_URL, ver, asset),
+        "url": "%s/releases/download/v%s/%s" % (REPO_URL, ver, asset),
+        "fallback_url": "%s/%s" % (SERVER_FILES, asset),
         "release_url": "%s/releases/tag/v%s" % (REPO_URL, ver),
         "site_url": SITE_URL + "/",
         "size": os.path.getsize(src) if src else 0,
@@ -477,8 +481,8 @@ def write_update_json(ver, onefile, installer):
     }
     if installer and os.path.exists(installer):
         sn = os.path.basename(installer)
-        data["setup_url"] = "%s/%s" % (SERVER_FILES, sn)
-        data["setup_fallback_url"] = "%s/releases/download/v%s/%s" % (REPO_URL, ver, sn)
+        data["setup_url"] = "%s/releases/download/v%s/%s" % (REPO_URL, ver, sn)
+        data["setup_fallback_url"] = "%s/%s" % (SERVER_FILES, sn)
     os.makedirs(os.path.dirname(UPDATE_JSON), exist_ok=True)
     with open(UPDATE_JSON, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
