@@ -136,43 +136,53 @@ def proxy_candidates():
     """按优先级给出代理候选；None 表示「不用代理、直连」。
 
     ① 环境变量 RELEASE_PROXY —— 显式指定，最高优先级；**空串表示强制直连**
-    ② 环境变量里的 https_proxy / http_proxy（沙箱与常见工具都会注入，端口可能变）
-    ③ 本机常见代理端口
+    ② 本机代理软件常用端口（10808 / 10809 / 7890 / 7897）
+    ③ 环境变量里的 https_proxy / http_proxy
     ④ None（直连）
+
+    为什么环境变量代理排在**后面**：这类变量常由沙箱/其他工具注入，可能只放行了
+    api.github.com，对 github.com 的 CONNECT 隧道会拒（2026-09-22 实测：环境里的
+    127.0.0.1:62577 访问 api 返回 200、访问 github.com 返回 000），拿它 push 必挂。
+    本机代理软件（Clash 等）的端口才是真正能出网的通道。
     """
     explicit = os.environ.get("RELEASE_PROXY")
     if explicit is not None:
         return [explicit.strip() or None]
 
     out = []
-    for key in ("https_proxy", "HTTPS_PROXY", "http_proxy", "HTTP_PROXY"):
-        v = (os.environ.get(key) or "").strip()
-        if v and v not in out:
-            out.append(v)
     for port in (10808, 10809, 7890, 7897):
         u = "http://127.0.0.1:%d" % port
         if u not in out:
             out.append(u)
+    for key in ("https_proxy", "HTTPS_PROXY", "http_proxy", "HTTP_PROXY"):
+        v = (os.environ.get(key) or "").strip()
+        if v and v not in out:
+            out.append(v)
     out.append(None)
     return out
 
 
-def proxy_works(proxy, timeout=6):
-    """实测该代理能否访问 GitHub。
+def proxy_works(proxy, timeout=5):
+    """实测该代理能否访问 GitHub；proxy=None 时测的是直连。
 
-    ⚠️ 只看端口开着是不够的 —— 踩过「10808 端口可连但出不了网」的坑，
-    必须真发一次请求。proxy=None 时测的是直连。
+    ⚠️ 两个域名**都必须通**才算可用：
+      · api.github.com —— 建 Release、传资产走它
+      · github.com     —— git push 走它（CONNECT 隧道到 443）
+    踩过的坑：某个代理只放行 api.github.com，于是被判为「可用」，
+    打包/签名/元数据全做完，最后 git push 报 CONNECT tunnel failed 502。
     """
-    try:
-        handlers = ([urllib.request.ProxyHandler({"http": proxy, "https": proxy})]
-                    if proxy else [urllib.request.ProxyHandler({})])
-        op = urllib.request.build_opener(*handlers)
-        req = urllib.request.Request("https://api.github.com",
-                                     headers={"User-Agent": "release-probe"})
-        with op.open(req, timeout=timeout) as resp:
-            return getattr(resp, "status", 0) == 200
-    except Exception:  # noqa: BLE001
-        return False
+    for url in ("https://api.github.com", "https://github.com"):
+        try:
+            handlers = ([urllib.request.ProxyHandler({"http": proxy, "https": proxy})]
+                        if proxy else [urllib.request.ProxyHandler({})])
+            op = urllib.request.build_opener(*handlers)
+            req = urllib.request.Request(url, headers={"User-Agent": "release-probe"})
+            with op.open(req, timeout=timeout) as resp:
+                if getattr(resp, "status", 0) != 200:
+                    return False
+        except Exception:  # noqa: BLE001
+            return False
+    return True
 
 
 def pick_proxy(log_fn=None):
