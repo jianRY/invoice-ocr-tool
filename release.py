@@ -96,7 +96,13 @@ def _pick_git():
 GIT = _pick_git()
 WCRED = r"C:\Users\toxuj\.workbuddy\binaries\PortableGit\versions\1.2.0\mingw64\bin\git-credential-wincred.exe"
 SIGN_PY = r"D:\workbuddy\诉讼案件网站\.pybuild_cache\signing\sign.py"
-PROXY = "http://127.0.0.1:10808"
+# ⚠️ 代理不再硬编码（2026-09-22 重构）：
+#    原先写死 127.0.0.1:10808，该代理一关或换端口，发版就会卡在最后一步 git push 上
+#    —— 打包/签名/元数据全做完了才失败，最亏的一步。
+#    实际踩过：10808 端口还开着（TCP 能连）但已不能出网，git 报
+#    「Could not connect to server」，而同一时刻环境变量里的代理是好的。
+#    现在由 pick_proxy() 在发版开始时**实测**挑选，None 表示直连。
+PROXY = None
 
 ISCC_CANDIDATES = [
     r"C:\Users\toxuj\.workbuddy\tools\InnoSetup7\ISCC.exe",
@@ -126,17 +132,83 @@ def run(cmd, cwd=None, check=True, env=None, timeout=None):
     return p
 
 
-def git_env():
-    """git 子进程环境：把 PortableGit 的 mingw64\\bin 补进 PATH。
+def proxy_candidates():
+    """按优先级给出代理候选；None 表示「不用代理、直连」。
 
-    这个 git 是便携版，它把 git-remote-https.exe 放在 mingw64\\bin 下（不在
-    exec-path 里），git 找远程 helper 时会翻 PATH。外部 PATH 被裁剪过
+    ① 环境变量 RELEASE_PROXY —— 显式指定，最高优先级；**空串表示强制直连**
+    ② 环境变量里的 https_proxy / http_proxy（沙箱与常见工具都会注入，端口可能变）
+    ③ 本机常见代理端口
+    ④ None（直连）
+    """
+    explicit = os.environ.get("RELEASE_PROXY")
+    if explicit is not None:
+        return [explicit.strip() or None]
+
+    out = []
+    for key in ("https_proxy", "HTTPS_PROXY", "http_proxy", "HTTP_PROXY"):
+        v = (os.environ.get(key) or "").strip()
+        if v and v not in out:
+            out.append(v)
+    for port in (10808, 10809, 7890, 7897):
+        u = "http://127.0.0.1:%d" % port
+        if u not in out:
+            out.append(u)
+    out.append(None)
+    return out
+
+
+def proxy_works(proxy, timeout=6):
+    """实测该代理能否访问 GitHub。
+
+    ⚠️ 只看端口开着是不够的 —— 踩过「10808 端口可连但出不了网」的坑，
+    必须真发一次请求。proxy=None 时测的是直连。
+    """
+    try:
+        handlers = ([urllib.request.ProxyHandler({"http": proxy, "https": proxy})]
+                    if proxy else [urllib.request.ProxyHandler({})])
+        op = urllib.request.build_opener(*handlers)
+        req = urllib.request.Request("https://api.github.com",
+                                     headers={"User-Agent": "release-probe"})
+        with op.open(req, timeout=timeout) as resp:
+            return getattr(resp, "status", 0) == 200
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def pick_proxy(log_fn=None):
+    """挑第一个**实测能用的**代理；全不行就直连。"""
+    for cand in proxy_candidates():
+        if proxy_works(cand):
+            if log_fn:
+                log_fn("代理：%s" % (cand or "不使用（直连）"))
+            return cand
+    if log_fn:
+        log_fn("代理：候选全部不可用，按直连处理")
+    return None
+
+
+def git_env(proxy=None):
+    """git 子进程环境：补齐 PATH，并把代理统一成 proxy 参数指定的那一个。
+
+    为什么要显式清掉环境变量里的代理：
+      ① git config 的 http.proxy 优先级**高于**环境变量，残留一个失效代理会让
+         push 直接失败（2026-09-22 踩过，见 PROXY 上方注释）；
+      ② 环境变量里的代理是别人注入的，未必能出网。
+      所以一律清空，再由 proxy 参数写入唯一的一个，行为可预期。
+
+    PATH 部分：这个 git 是便携版，它把 git-remote-https.exe 放在 mingw64\\bin 下
+    （不在 exec-path 里），git 找远程 helper 时会翻 PATH。外部 PATH 被裁剪过
     （本环境 shell 的 PATH 常缺 Git 目录）时就报
-    `git: 'remote-https' is not a git command`，push 直接失败。
-    显式补上，别依赖调用方的 PATH。
+    `git: 'remote-https' is not a git command`，push 直接失败。显式补上。
     """
     e = dict(os.environ)
     e["PATH"] = os.path.dirname(GIT) + os.pathsep + e.get("PATH", "")
+    for k in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY",
+              "all_proxy", "ALL_PROXY"):
+        e.pop(k, None)
+    if proxy:
+        e["http_proxy"] = e["https_proxy"] = proxy
+        e["HTTP_PROXY"] = e["HTTPS_PROXY"] = proxy
     return e
 
 
@@ -584,7 +656,7 @@ def upload_asset(token, rid, path, name):
 
 # ---------------- git ----------------
 def git(*args, check=True):
-    return run([GIT] + list(args), cwd=ROOT, check=check, env=git_env())
+    return run([GIT] + list(args), cwd=ROOT, check=check, env=git_env(PROXY))
 
 
 def git_commit_tag_push(ver, token):
@@ -596,17 +668,23 @@ def git_commit_tag_push(ver, token):
     else:
         git("commit", "-q", "-m", "release: v%s" % ver)
     git("tag", "-a", "v" + ver, "-m", "%s v%s" % (APP_NAME, ver), check=False)
-    log("推送（走代理）…")
-    git("config", "http.proxy", PROXY, check=False)
-    git("config", "https.proxy", PROXY, check=False)
+    log("推送%s…" % ("（经 %s）" % PROXY if PROXY else "（直连）"))
+    # ⚠️ 先清掉仓库里可能残留的 http.proxy：git config 的优先级**高于**环境变量，
+    #    残留一个已失效的代理会直接让 push 失败（2026-09-22 踩过：10808 端口还开着
+    #    但出不了网，打包签名全成功、最后一步 push 挂掉）。
+    #    本次用哪个代理完全由 git_env(PROXY) 注入的环境变量决定。
+    git("config", "--unset", "http.proxy", check=False)
+    git("config", "--unset", "https.proxy", check=False)
     try:
         url = "https://x-access-token:%s@github.com/%s.git" % (token, OWNER_REPO)
         print("   $ git push <token>@github.com/%s.git %s v%s" % (OWNER_REPO, MAIN_BRANCH, ver))
-        p = run([GIT, "push", url, MAIN_BRANCH], check=False, env=git_env())
+        p = run([GIT, "push", url, MAIN_BRANCH], check=False, env=git_env(PROXY))
         if p.returncode != 0:
             print(re.sub(r"x-access-token:[^@\s]+@", "x-access-token:***@", p.stderr or "")[-800:])
+            log("  提示：可显式指定代理重试 —— set RELEASE_PROXY=http://127.0.0.1:7890")
+            log("        或强制直连 —— set RELEASE_PROXY=")
             raise SystemExit("push 分支失败")
-        p2 = run([GIT, "push", url, "v" + ver], check=False, env=git_env())
+        p2 = run([GIT, "push", url, "v" + ver], check=False, env=git_env(PROXY))
         if p2.returncode != 0:
             log("  !! tag v%s 推送失败（可能远端已存在），继续" % ver)
         log("  推送完成")
@@ -701,6 +779,9 @@ def main():
     ap.add_argument("--verify-wait", type=int, default=180, help="线上展示页校验等待秒数（默认 180）")
     ap.add_argument("--allow-missing-notes", action="store_true")
     args = ap.parse_args()
+
+    global PROXY
+    PROXY = pick_proxy(log)
 
     os.makedirs(CACHE, exist_ok=True)
     os.makedirs(DIST, exist_ok=True)
