@@ -10,7 +10,7 @@
   "site_url": "http://47.116.64.26:8888/",
   "size": 127595624,
   "sha256": "3d5fedf1e40e101baa84cea4b2e6eae0ff28b40ce8be2963d4647f22ecf5ed13",
-  "published": "2026-09-24 22:07:27",
+  "published": "2026-09-24 22:09:49",
   "setup_url": "https://github.com/jianRY/invoice-ocr-tool/releases/download/v1.3.3/InvoiceOcrTool_v1.3.3_setup.exe",
   "setup_fallback_url": "http://47.116.64.26:8888/files/InvoiceOcrTool_v1.3.3_setup.exe"
 }
