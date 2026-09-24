@@ -734,9 +734,27 @@ def ensure_server_top(manual):
 
 def copy_delivery(onefile, installer, ver):
     os.makedirs(DELIVERY, exist_ok=True)
-    pairs = [(onefile, "%s-单文件版.exe" % APP_NAME)]
+    # ⚠️ 交付文件名必须带版本号（建哥 2026-09-24 要求）：放桌面/U 盘一眼看出版本，
+    #    不会新旧两个文件名一样分不清。GitHub Release 资产名保持 ASCII（宝塔同步链依赖）。
+    pairs = [(onefile, "%s_v%s_单文件版.exe" % (APP_NAME, ver))]
     if installer:
-        pairs.append((installer, "%s-安装版.exe" % APP_NAME))
+        pairs.append((installer, "%s_v%s_安装版.exe" % (APP_NAME, ver)))
+    # 旧命名（不带版本 / 旧版本号）的残留归档到 _旧版备份/，避免和新名字并存混淆
+    import glob as _glob
+    legacy_dir = os.path.join(DELIVERY, "_旧版备份")
+    keep = {os.path.abspath(s).upper() for s, _ in pairs}
+    for legacy in ("%s-单文件版.exe" % APP_NAME, "%s-安装版.exe" % APP_NAME,
+                   "%s_v[0-9.]*_单文件版.exe" % APP_NAME,
+                   "%s_v[0-9.]*_安装版.exe" % APP_NAME):
+        for p in _glob.glob(os.path.join(DELIVERY, legacy)):
+            if os.path.abspath(p).upper() in keep:
+                continue
+            try:
+                os.makedirs(legacy_dir, exist_ok=True)
+                shutil.move(p, os.path.join(legacy_dir, os.path.basename(p)))
+                log("交付 -> 旧命名归档 %s" % os.path.basename(p))
+            except (OSError, shutil.Error) as e:
+                log("!! 旧命名归档失败（忽略）：%s（%s）" % (os.path.basename(p), e))
     sizes = []
     for src, nm in pairs:
         if src and os.path.exists(src):
@@ -765,6 +783,12 @@ def copy_delivery(onefile, installer, ver):
                     "发票识别汇总工具 v%s 使用说明" % ver, t, count=1, flags=re.M)
         t2 = re.sub(r"^v[\d.]+(\s+)\d{4}-\d{2}-\d{2}",
                     "v%s\\g<1>" % ver + time.strftime("%Y-%m-%d"), t2, count=1, flags=re.M)
+        # 交付文件名带版本号后，说明里的两处文件名引用也要同步刷：
+        # 旧命名「…-单文件版.exe」（连字符）与新命名「…_vX.Y.Z_单文件版.exe」都认
+        t2 = re.sub(r"%s(?:-|_v[\d.]+_)单文件版\.exe" % re.escape(APP_NAME),
+                    "%s_v%s_单文件版.exe" % (APP_NAME, ver), t2)
+        t2 = re.sub(r"%s(?:-|_v[\d.]+_)安装版\.exe" % re.escape(APP_NAME),
+                    "%s_v%s_安装版.exe" % (APP_NAME, ver), t2)
         it = iter("%.1f MB" % s for s in sizes)
         t2 = re.sub(r"[\d.]+ MB", lambda m: next(it, m.group(0)), t2, count=len(sizes))
         if t2 != t:

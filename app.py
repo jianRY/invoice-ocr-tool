@@ -28,7 +28,7 @@ from excel_out import export_excel
 from parser import IMG_EXTS, parse_image
 from pdf_convert import WORK_DIR, prepare, scan as scan_files, summary as prep_summary
 
-VERSION = "1.3.2"
+VERSION = "1.3.3"
 APP_TITLE = f"发票识别汇总工具 v{VERSION}"
 OUT_XLSX = "发票识别汇总.xlsx"
 UNKNOWN_DIR = "未识别"
@@ -45,6 +45,9 @@ HEADS = ("文件名", "发票号码", "开票日期", "购买方", "销售方", 
 WIDTHS = (260, 165, 85, 110, 180, 55, 90, 70)
 STATS = (("tickets", "票据总数"), ("ok", "识别成功"),
          ("fail", "未识别"), ("total", "价税合计"))
+# 统计卡左侧色条：蓝 / 绿 / 红 / 深蓝
+STAT_COLORS = {"tickets": "#1F4E79", "ok": "#1E8E5A",
+               "fail": "#C0392B", "total": "#163A5F"}
 
 
 class App:
@@ -139,16 +142,34 @@ class App:
         sk = self.sk
         root = self.root
 
-        # ── 品牌头（flat：浅底 logo + 标题 + 副标题） ──
+        # ── 品牌头（flat：浅渐变底 + logo + 标题/副标题 + 版本徽章） ──
+        # ⚠️ 标题 15pt 在 150% DPI 下字形下沉明显，副标题 y 必须 ≥ 标题底 + 空隙，
+        #    否则两行视觉上贴死甚至重叠（v1.3.2 就栽在这）。
         head = tk.Canvas(root, bg=sk.bg, highlightthickness=0, bd=0,
-                         height=K.u(64))
+                         height=K.u(72))
         head.pack(fill="x")
-        K.logo_mark(head, K.u(20), K.u(12), K.u(40), sk)
-        head.create_text(K.u(74), K.u(12), text="发票识别汇总",
-                         font=K.f(15, True), fill=sk.text, anchor="nw")
-        head.create_text(K.u(76), K.u(40), anchor="w",
-                         text="本地离线 OCR · 自动汇总 Excel · 数据不上传",
-                         font=K.f(9), fill=sk.muted)
+
+        def _paint_head(cv, w, h):
+            cv.delete("all")
+            if w < 40 or h < 20:
+                return
+            K.h_gradient(cv, 0, 0, w, h, "#E9F1F9", "#F4F7FB", steps=72)
+            K.logo_mark(cv, K.u(20), K.u(16), K.u(40), sk)
+            cv.create_text(K.u(74), K.u(13), text="发票识别汇总",
+                           font=K.f(15, True), fill=sk.text, anchor="nw")
+            cv.create_text(K.u(76), K.u(47), anchor="w",
+                           text="本地离线 OCR · 自动汇总 Excel · 数据不上传",
+                           font=K.f(9), fill=sk.muted)
+            # 右侧版本徽章
+            t = "v" + VERSION
+            tw = K.text_w(cv, t, K.f(9, True))
+            bx1, bx2 = w - K.u(24) - tw - K.u(18), w - K.u(24)
+            by1, by2 = (h - K.u(24)) / 2, (h + K.u(24)) / 2
+            K.rr(cv, bx1, by1, bx2, by2, K.u(12), sk.accent_l)
+            cv.create_text((bx1 + bx2) / 2, (by1 + by2) / 2, text=t,
+                           font=K.f(9, True), fill=sk.accent_d)
+
+        head.bind("<Configure>", lambda e: _paint_head(head, e.width, e.height))
 
         # ── 文件夹卡 ──
         c_folder = K.Card(root, sk, pad=14)
@@ -181,9 +202,14 @@ class App:
             c = K.Card(srow, sk, pad=12)
             c.configure(width=K.u(220))
             c.pack(side="left", expand=True, fill="x", padx=(0, K.u(10)))
-            lab = tk.Label(c.body, text="—", font=K.f(15, True),
+            top = tk.Frame(c.body, bg=sk.card)
+            top.pack(fill="x")
+            bar = tk.Frame(top, bg=STAT_COLORS.get(key, sk.accent),
+                           width=K.u(4), height=K.u(17))
+            bar.pack(side="left", padx=(0, K.u(8)))
+            lab = tk.Label(top, text="—", font=K.f(15, True),
                            fg=sk.accent_d, bg=sk.card)
-            lab.pack(anchor="w")
+            lab.pack(side="left")
             tk.Label(c.body, text=cap, font=K.f(9), fg=sk.muted,
                      bg=sk.card).pack(anchor="w")
             self.stat_labels[key] = lab
@@ -212,6 +238,7 @@ class App:
         vsb.pack(side="right", fill="y")
         self.tree.pack(side="left", fill="both", expand=True)
         self.tree.tag_configure("fail", foreground="#C00000")
+        self.tree.tag_configure("odd", background="#F6F9FC")
 
         # ── 底栏 ──
         bottom = tk.Frame(root, bg=sk.bg)
@@ -254,6 +281,7 @@ class App:
 
     # ---------- 进度（准备阶段流动模拟） ----------
     def _start_indet(self):
+        self._stop_indet()          # 防御：上次流动链未停时避免双链并行
         self._indet = True
         self._indet_v = 4.0
         self._tick_indet()
@@ -338,22 +366,28 @@ class App:
                          daemon=True).start()
 
     def _worker(self, folder, use_pdf):
-        prep = prepare(folder, enabled=use_pdf,
-                       log=lambda m: self.q.put(("stage", m)))
-        work = prep["work_dir"]
-        imgs = [f for f in sorted(os.listdir(work))
-                if os.path.splitext(f)[1].lower() in IMG_EXTS and not f.startswith("_")]
-        self.q.put(("prep", prep, len(imgs)))
-        if not imgs:
-            self.q.put(("done", work, prep, 0))
-            return
-        from rapidocr_onnxruntime import RapidOCR
-        eng = RapidOCR()
-        for i, name in enumerate(imgs, 1):
-            rec = parse_image(eng, os.path.join(work, name))
-            self.q.put(("row", rec))
-            self.q.put(("progress", i, len(imgs), name))
-        self.q.put(("done", work, prep, len(imgs)))
+        # ⚠️ 整体兜底：识别线程里任何未捕获异常（OCR 引擎加载失败、目录被删、
+        #    磁盘错误…）若不回报，主界面会永远停在「准备文件…」的流动进度上，
+        #    用户只能强杀进程。必须把异常递回 UI 走 error 分支恢复按钮。
+        try:
+            prep = prepare(folder, enabled=use_pdf,
+                           log=lambda m: self.q.put(("stage", m)))
+            work = prep["work_dir"]
+            imgs = [f for f in sorted(os.listdir(work))
+                    if os.path.splitext(f)[1].lower() in IMG_EXTS and not f.startswith("_")]
+            self.q.put(("prep", prep, len(imgs)))
+            if not imgs:
+                self.q.put(("done", work, prep, 0))
+                return
+            from rapidocr_onnxruntime import RapidOCR
+            eng = RapidOCR()
+            for i, name in enumerate(imgs, 1):
+                rec = parse_image(eng, os.path.join(work, name))
+                self.q.put(("row", rec))
+                self.q.put(("progress", i, len(imgs), name))
+            self.q.put(("done", work, prep, len(imgs)))
+        except Exception as e:  # noqa: BLE001
+            self.q.put(("error", "%s" % e))
 
     def _poll(self):
         if self._closing:
@@ -366,7 +400,12 @@ class App:
                     rec = msg[1]
                     self.records.append(rec)
                     total = f"{rec['total']:,.2f}" if rec["total"] is not None else "—"
-                    self.tree.insert("", "end", tags=("fail",) if not rec["ok"] else (),
+                    tags = []
+                    if not rec["ok"]:
+                        tags.append("fail")
+                    elif len(self.records) % 2 == 0:
+                        tags.append("odd")      # 斑马纹（失败红字优先）
+                    self.tree.insert("", "end", tags=tuple(tags),
                                      values=(rec["file"], rec["invoice_no"] or "—",
                                              rec["date"] or "—", rec["buyer"] or "—",
                                              rec["seller"] or "—",
@@ -390,9 +429,23 @@ class App:
                     self.lbl_stat.configure(text=f"{i}/{n}  {name[:24]}")
                 elif kind == "done":
                     self._finish(msg[1], msg[2], msg[3])
+                elif kind == "error":
+                    self._recover(msg[1])
         except queue.Empty:
             pass
         self._poll_job = self.root.after(120, self._poll)
+
+    def _recover(self, reason):
+        """识别线程异常后恢复界面（对应 _poll 的 error 分支）。"""
+        self.running = False
+        self._stop_indet()
+        self.btn_run.configure_state("normal", "开始识别")
+        self.btn_export.configure_state("normal")
+        self.progress.set_value(0, stopped=True)
+        self.lbl_stat.configure(text="识别失败")
+        self._update_stats()
+        messagebox.showerror(APP_TITLE, "识别过程出错：%s\n\n"
+                             "可重试；若反复出现请把提示截图反馈。" % reason)
 
     def _finish(self, work, prep, img_n):
         self.running = False
@@ -431,6 +484,7 @@ class App:
                     except OSError:
                         pass
         ok_n = len(self.records) - len(unknown)
+        self.lbl_stat.configure(text="完成：成功 %d / 未识别 %d" % (ok_n, len(unknown)))
         try:
             info = self.export()
             lines = [f"识别完成：成功 {ok_n} 张，未识别 {len(unknown)} 张"

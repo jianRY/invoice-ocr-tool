@@ -1,16 +1,16 @@
 {
   "app": "ocr",
   "name": "发票识别汇总工具",
-  "version": "1.3.2",
-  "asset": "InvoiceOcrTool_v1.3.2.exe",
-  "notes": "## v1.3.2（2026-09-22）\n\n**界面焕新：精致卡片风格（方案 B）**\n- 全新品牌头：应用图标 + 标题 +「本地离线 OCR · 自动汇总 Excel · 数据不上传」副标题\n- 文件夹选择、进度、结果表格全部改为圆角卡片承载，按钮 / 复选框 / 进度条均为自绘圆角控件\n- 新增 4 张实时统计卡：**票据总数 / 识别成功 / 未识别 / 价税合计**，随识别进度逐条刷新；\n  未识别数为红色警示、全部成功为绿色\n- 准备阶段（PDF 转换、扫描文件）进度条以流动动效呈现，识别阶段切换为真实百分比\n- 适配高分屏（150% / 200% 缩放不发虚、不错位）；表格行距加大、表头浅蓝底\n- 交互与识别逻辑与 v1.3.1 完全一致，纯界面升级，无功能变化",
-  "url": "https://github.com/jianRY/invoice-ocr-tool/releases/download/v1.3.2/InvoiceOcrTool_v1.3.2.exe",
-  "fallback_url": "http://47.116.64.26:8888/files/InvoiceOcrTool_v1.3.2.exe",
-  "release_url": "https://github.com/jianRY/invoice-ocr-tool/releases/tag/v1.3.2",
+  "version": "1.3.3",
+  "asset": "InvoiceOcrTool_v1.3.3.exe",
+  "notes": "## v1.3.3（2026-09-24）\n\n**问题修复**\n- 修复识别过程中若 OCR 引擎加载失败或文件夹被外部改动，界面会一直停在「准备文件…」流动进度的问题\n  —— 现在会弹窗说明具体原因并恢复按钮，可直接重试\n- 修复界面顶部「软件名 + 描述」两行文字在高分屏（150% 缩放）上贴得过近、视觉重叠的问题\n\n**界面优化**\n- 顶部品牌头改为浅蓝渐变，右侧新增当前版本徽章\n- 统计卡新增彩色标识条：票据（蓝）/ 识别成功（绿）/ 未识别（红）/ 价税合计（深蓝）\n- 识别结果表格新增斑马纹，逐行核对更省力；识别完成后状态栏直接显示「完成：成功 x / 未识别 y」\n\n**交付优化**\n- 下载文件名带上版本号（如 发票识别汇总工具_v1.3.3_单文件版.exe），桌面 / U 盘里一眼识别版本；\n  旧命名的文件会自动归档到交付目录的「_旧版备份」文件夹",
+  "url": "https://github.com/jianRY/invoice-ocr-tool/releases/download/v1.3.3/InvoiceOcrTool_v1.3.3.exe",
+  "fallback_url": "http://47.116.64.26:8888/files/InvoiceOcrTool_v1.3.3.exe",
+  "release_url": "https://github.com/jianRY/invoice-ocr-tool/releases/tag/v1.3.3",
   "site_url": "http://47.116.64.26:8888/",
-  "size": 127593976,
-  "sha256": "1d89dc769489bf4bbbd512ab9ca0df2d76c5468fe3b3ac1caa994100f38a9689",
-  "published": "2026-09-24 21:51:31",
-  "setup_url": "https://github.com/jianRY/invoice-ocr-tool/releases/download/v1.3.2/InvoiceOcrTool_v1.3.2_setup.exe",
-  "setup_fallback_url": "http://47.116.64.26:8888/files/InvoiceOcrTool_v1.3.2_setup.exe"
+  "size": 127595624,
+  "sha256": "3d5fedf1e40e101baa84cea4b2e6eae0ff28b40ce8be2963d4647f22ecf5ed13",
+  "published": "2026-09-24 22:07:27",
+  "setup_url": "https://github.com/jianRY/invoice-ocr-tool/releases/download/v1.3.3/InvoiceOcrTool_v1.3.3_setup.exe",
+  "setup_fallback_url": "http://47.116.64.26:8888/files/InvoiceOcrTool_v1.3.3_setup.exe"
 }
