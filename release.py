@@ -742,13 +742,13 @@ def copy_delivery(onefile, installer, ver):
     # 旧命名（不带版本 / 旧版本号）的残留归档到 _旧版备份/，避免和新名字并存混淆
     import glob as _glob
     legacy_dir = os.path.join(DELIVERY, "_旧版备份")
-    keep = {os.path.abspath(s).upper() for s, _ in pairs}
+    new_names = {nm for _, nm in pairs}          # 本次要写的目标名：直接覆盖，不归档
     for legacy in ("%s-单文件版.exe" % APP_NAME, "%s-安装版.exe" % APP_NAME,
                    "%s_v[0-9.]*_单文件版.exe" % APP_NAME,
                    "%s_v[0-9.]*_安装版.exe" % APP_NAME):
         for p in _glob.glob(os.path.join(DELIVERY, legacy)):
-            if os.path.abspath(p).upper() in keep:
-                continue
+            if os.path.basename(p) in new_names:
+                continue                          # 同名 = 本版产物，稍后 copy2 覆盖即可
             try:
                 os.makedirs(legacy_dir, exist_ok=True)
                 shutil.move(p, os.path.join(legacy_dir, os.path.basename(p)))

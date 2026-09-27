@@ -40,7 +40,6 @@ update.json 由发版脚本 release.py 生成并随 Release 上传，字段：
                                 config_file=..., log_fn=...)
 """
 
-import atexit
 import hashlib
 import json
 import os
@@ -523,81 +522,11 @@ def _purge(directory, current, log_fn=None, max_wait=8.0):
     return removed
 
 
-# ---------------------------------------------------------------- 待改名登记
-# ⚠️⚠️ 2026-09-27 实测铁律：
-#   **把正在运行的 exe 改名，会让本进程的出网彻底失效**（连 DNS 都出不去，75 秒不恢复）。
-#   对照实测：正常文件名 → 4 秒出网；改成中间名（= 更新后就地启动的真实场景）→
-#   75 秒一个字节都发不出。与「谁启动的」无关，只与「有没有改自己的名字」有关。
-#   用户症状：更新完自动打开的新版，一联网就卡住，必须关掉重开。
-# 所以：**绝不在运行期间改名**，只登记待办，等进程退出时（已不需要网络）再改。
-_PENDING_RENAME = None
-_RENAME_HOOKED = False
-_PENDING_LOG_FN = None
-
-
-def _park_file(directory, path, ext):
-    """把 path 挪成 `xxx_旧版_<时间戳>.exe`，返回是否成功。
-
-    运行中的 exe 不能删、不能覆盖，但**可以改名**（同目录改名不受锁限制）；
-    带时间戳是为了避免「目标已存在」导致 rename 失败。
-    """
-    try:
-        pstem = os.path.splitext(os.path.basename(path))[0]
-        parked = os.path.join(
-            directory, "%s_旧版_%s%s" % (pstem, time.strftime("%Y%m%d%H%M%S"), ext))
-        if os.path.exists(parked):
-            try:
-                os.remove(parked)
-            except OSError:
-                parked = os.path.join(
-                    directory, "%s_旧版_%d%s" % (pstem, int(time.time() * 1000), ext))
-        os.rename(path, parked)
-        return True
-    except OSError:
-        return False
-
-
-def apply_pending_rename(log_fn=None):
-    """进程退出时把程序文件名改成应有名字（由 atexit 自动调用）。
-
-    放在退出时做，是为了绕开上面那条铁律：此时网络已经不需要了，改名无副作用。
-    幂等且绝不抛异常 —— 它跑在解释器关闭阶段，出错也不能影响退出。
-    """
-    p = _PENDING_RENAME
-    if not p:
-        return False
-    log_fn = log_fn or _PENDING_LOG_FN
-
-    def _log(m):
-        try:
-            if log_fn:
-                log_fn(m)
-        except Exception:  # noqa: BLE001
-            pass
-
-    try:
-        current, final = p["current"], p["final"]
-        if not os.path.exists(current):
-            return False
-        if os.path.abspath(current).lower() == os.path.abspath(final).lower():
-            return False
-        if os.path.exists(final):
-            # 目标名已被占用（又更新过一次 / 用户自己放了同名文件）→ 不动手，绝不覆盖
-            _log("退出时未改名：%s 已存在，留给下次启动处理" % os.path.basename(final))
-            return False
-        os.rename(current, final)
-        _log("已把程序文件名改为：%s" % os.path.basename(final))
-        return True
-    except Exception:  # noqa: BLE001
-        return False
-
-
 def settle_after_update(log_fn=None):
-    # ⚠️ 绝不在这里改自己的名字 —— 见上方铁律。只登记，退出时由 atexit 执行。
     """程序启动时调用：接管原文件名，并清掉更新过程留下的旧版文件。
 
-    只在打包运行时生效。「接管」被拆成两半：启动时把旧文件挪开、登记待改名；
-    真正的改名推迟到进程退出（atexit）—— 原因见上方铁律。
+    只在打包运行时生效。所谓「接管」：如果自己是以中间名（xxx_更新中.exe）
+    启动的，就把旧的 xxx.exe 挪开、把自己改名为 xxx.exe，让用户看到的文件名始终不变。
 
     为什么新版要先用中间名启动，而不是直接顶替原文件名：
         实测（Windows 10/11 + PyInstaller onefile）**无法在「当前运行进程自己的
@@ -618,31 +547,31 @@ def settle_after_update(log_fn=None):
         except Exception:  # noqa: BLE001
             pass
 
-    global _PENDING_RENAME, _RENAME_HOOKED, _PENDING_LOG_FN
     directory = os.path.dirname(current)
     stem, ext = os.path.splitext(os.path.basename(current))
     base = _base_stem(stem)
     final = os.path.join(directory, base + ext)
 
-    # ① 名字不对时：把占位的旧文件挪开 + 登记待改名（**绝不在这里动手**）
-    #    ⚠️ 运行期间改自己的名字会让本进程**出网永久失效**，见上方铁律。
-    #    挪开「别的文件」不属于改自己的名字，不影响网络，可以照做。
+    # ① 接管文件名：自己叫中间名时，把旧版挪开（运行中的 exe 允许改名），自己顶上
     if os.path.abspath(current).lower() != os.path.abspath(final).lower():
         # 旧版名带时间戳：若沿用固定名（xxx_旧版.exe），一旦上次更新留下同名残留，
-        # Windows 的 os.rename 会因「目标已存在」直接失败 → 接管失败 → 用户继续启动旧版。
-        # 带时间戳 + 冲突兜底可彻底避免。
-        if os.path.exists(final):
-            _park_file(directory, final, ext)
-        _PENDING_RENAME = {"current": current, "final": final}
-        _PENDING_LOG_FN = log_fn
-        if not _RENAME_HOOKED:
+        # Windows 的 os.rename 会因「目标已存在」直接失败 → 接管失败 → 用户继续启动
+        # 旧版本（症状就是「更新了却没变」）。带时间戳 + 冲突兜底可彻底避免。
+        parked = os.path.join(
+            directory, "%s_旧版_%s%s" % (base, time.strftime("%Y%m%d%H%M%S"), ext))
+        if os.path.exists(parked):
             try:
-                atexit.register(apply_pending_rename)
-                _RENAME_HOOKED = True
-            except Exception:  # noqa: BLE001
-                pass
-        _log("程序文件名将在退出时改为：%s（本次运行不受影响）"
-             % os.path.basename(final))
+                os.remove(parked)          # 自己上次的残留，能删就复用这个名字
+            except OSError:
+                parked = os.path.join(
+                    directory, "%s_旧版_%d%s" % (base, int(time.time() * 1000), ext))
+        try:
+            if os.path.exists(final):
+                os.rename(final, parked)
+            os.rename(current, final)
+            _log("已接管程序文件名：%s" % os.path.basename(final))
+        except OSError as e:  # noqa: BLE001
+            _log("暂未能接管文件名（旧版本可能仍在运行）：%s" % e)
 
     # ② 清掉所有旧版/中间残留（含刚被挪开的那份，旧进程退出后即可删除）
     return _purge(directory, current, log_fn=log_fn, max_wait=12.0)
