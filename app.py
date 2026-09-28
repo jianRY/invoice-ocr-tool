@@ -1,15 +1,18 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""发票识别汇总工具 - 主程序（Tkinter GUI，v1.3.2 精致卡片界面）
+"""发票识别汇总工具 - 主程序（Tkinter GUI）
 
-选择文件夹 -> [前置] 有 PDF 则逐页转 JPG 到「处理后」目录
--> OCR 识别全部图片 -> 识别失败的图复制到 未识别/ 子文件夹
--> 导出 发票识别汇总.xlsx（票据汇总 + 明细）
+选择文件夹 -> 递归扫描它和它的全部子文件夹 -> 每个含票据的目录各自走一遍：
+[前置] 有 PDF 则逐页转 JPG 到该目录的「处理后」-> OCR 识别该目录全部图片
+-> 识别失败的图复制到该目录的 未识别/ -> 在该目录导出 发票识别汇总.xlsx
 
-界面（方案 B）：品牌头 + 圆角卡片 + 实时统计卡（票据/成功/未识别/价税合计），
-自绘按钮 / 复选框 / 进度条；业务逻辑与 v1.3.1 完全一致。
+识别过程中可随时点「停止」：当前图片处理完即收工，已识别的结果与已生成的 Excel 全部保留，
+下次点「开始识别」会接着处理剩余的图片（PDF 转图、复制均为幂等）。
 
-PDF 前置步骤见 pdf_convert.py：目录里没有 PDF 时完全跳过，行为与旧版一致。
+界面：品牌头 + 圆角卡片 + 实时统计卡（票据/成功/未识别/价税合计），
+自绘按钮 / 复选框 / 进度条。
+
+PDF 前置步骤见 pdf_convert.py；目录递归收集见 pdf_convert.collect_dirs。
 
 ⚠️ ui_kit 必须最先 import：它在 import tkinter 之前开启 DPI 感知（高分屏不发虚）。
 """
@@ -26,12 +29,14 @@ from tkinter import filedialog, font as tkfont, messagebox, ttk
 import autoupdate
 from excel_out import export_excel
 from parser import IMG_EXTS, parse_image
-from pdf_convert import WORK_DIR, prepare, scan as scan_files, summary as prep_summary
+from pdf_convert import (WORK_DIR, collect_dirs, prepare, summary as prep_summary)
 
-VERSION = "1.3.4"
+VERSION = "1.4.0"
 APP_TITLE = f"发票识别汇总工具 v{VERSION}"
 OUT_XLSX = "发票识别汇总.xlsx"
 UNKNOWN_DIR = "未识别"
+# 总结里最多列几个目录的 Excel 路径（超出的用一行概括，免得弹窗长到看不完）
+MAX_LIST_DIRS = 10
 
 # 皮肤：与旧版标题色同源的商务蓝
 SKIN = K.Skin("ocr", "精致卡片", "品牌头 + 统计卡",
@@ -48,6 +53,40 @@ STATS = (("tickets", "票据总数"), ("ok", "识别成功"),
 # 统计卡左侧色条：蓝 / 绿 / 红 / 深蓝
 STAT_COLORS = {"tickets": "#1F4E79", "ok": "#1E8E5A",
                "fail": "#C0392B", "total": "#163A5F"}
+
+
+def dir_label(rel):
+    """目录展示名：根目录 →「根目录」，子目录 → 相对路径。"""
+    return "根目录" if rel in (".", "") else rel
+
+
+def archive_unknown(work, recs):
+    """把本目录里未识别的图复制一份到 work/未识别（原图不动）。返回复制张数。"""
+    unknown = [r for r in recs if not r["ok"]]
+    if not unknown:
+        return 0
+    udir = os.path.join(work, UNKNOWN_DIR)
+    try:
+        os.makedirs(udir, exist_ok=True)
+    except OSError:
+        return 0
+    n = 0
+    for r in unknown:
+        src = os.path.join(work, r["file"])
+        dst = os.path.join(udir, r["file"])
+        if os.path.exists(src) and not os.path.exists(dst):
+            try:
+                shutil.copy2(src, dst)
+                n += 1
+            except OSError:
+                pass
+    return n
+
+
+def export_dir(work, recs):
+    """导出单个目录的 Excel（只含识别成功的行，与旧版口径一致）。"""
+    return export_excel([r for r in recs if r["ok"]],
+                        os.path.join(work, OUT_XLSX))
 
 
 class App:
@@ -68,10 +107,15 @@ class App:
 
         # 运行状态（先于 UI 建）
         self.q = queue.Queue()
-        self.records = []
+        self.records = []            # 本次运行识别到的全部行（跨目录累计）
+        self.dir_results = []        # 每个目录一条：{rel, work, prep, recs, copied, excel}
         self.folder = tk.StringVar()
-        self.work_dir = None
+        self.root_dir = ""           # 用户选中的根目录
+        self.work_dir = None         # 单个目录时=该目录的工作目录；多目录时=根目录
+        self.cur_dir = "."           # 正在处理的目录（相对根目录）
+        self.eng = None              # OCR 引擎，跨目录复用（加载一次很贵）
         self.running = False
+        self._stop = threading.Event()
         self._closing = False
         self._poll_job = None
         self._post_job = None
@@ -185,6 +229,9 @@ class App:
         self.btn_browse.pack(side="left", padx=(0, K.u(8)))
         self.btn_run = self._btn(row1, "开始识别", self.start, kind="primary", h=36)
         self.btn_run.pack(side="left")
+        self.btn_stop = self._btn(row1, "停止", self.stop, kind="danger", h=36)
+        self.btn_stop.pack(side="left", padx=(K.u(8), 0))
+        self.btn_stop.configure_state("disabled")
 
         row2 = tk.Frame(c_folder.body, bg=sk.card)
         row2.pack(fill="x", pady=(K.u(10), 0))
@@ -193,6 +240,11 @@ class App:
                            text="自动把 PDF 转成图片（PDF 逐页转 JPG，连同原有图片"
                                 "一起转入「%s」文件夹后再识别）" % WORK_DIR)
         chk.pack(fill="x", anchor="w")   # fill 拉伸至 body 宽，长文案不被裁
+
+        tk.Label(c_folder.body, bg=sk.card, fg=sk.faint, font=K.f(9), anchor="w",
+                 text="自动递归处理所选文件夹及其全部子文件夹：每个含票据的目录"
+                      "各自识别、各自生成 Excel 与「未识别」，识别中可随时「停止」"
+                 ).pack(fill="x", pady=(K.u(6), 0))
 
         # ── 统计卡行（4 张；⚠️ 必须显式给宽，否则互相抢宽被挤丢） ──
         srow = tk.Frame(root, bg=sk.bg)
@@ -220,7 +272,7 @@ class App:
         self.progress = K.RoundProgress(c_prog.body, sk, height=10)
         self.progress.pack(side="left", fill="x", expand=True)
         self.lbl_stat = tk.Label(c_prog.body, text="就绪", font=K.f(9),
-                                 fg=sk.muted, bg=sk.card, width=32, anchor="e")
+                                 fg=sk.muted, bg=sk.card, width=40, anchor="e")
         self.lbl_stat.pack(side="left", padx=(K.u(10), 0))
 
         # ── 结果表格卡（高度随窗口拉伸） ──
@@ -343,17 +395,15 @@ class App:
             messagebox.showwarning(APP_TITLE, "请先选择有效的文件夹")
             return
         use_pdf = bool(self.var_pdf.get())
-        imgs, pdfs = scan_files(folder)
-        if not imgs and not (use_pdf and pdfs):
-            if pdfs:
-                messagebox.showinfo(APP_TITLE, "该文件夹里只有 PDF，请勾选下面的「自动把 PDF 转成图片」")
-            else:
-                messagebox.showinfo(APP_TITLE, "该文件夹下没有找到图片或 PDF 文件")
-            return
         self.running = True
         self.records = []
+        self.dir_results = []
+        self.root_dir = folder
         self.work_dir = None
+        self.cur_dir = "."
+        self._stop.clear()
         self.btn_run.configure_state("disabled", "识别中…")
+        self.btn_stop.configure_state("normal", "停止")
         self.btn_export.configure_state("disabled")
         self.btn_open.configure_state("disabled")
         for i in self.tree.get_children():
@@ -361,31 +411,79 @@ class App:
         self._update_stats()
         self.lbl_out.configure(text="")
         self._start_indet()
-        self.lbl_stat.configure(text="准备文件…")
+        self.lbl_stat.configure(text="扫描子文件夹…")
         threading.Thread(target=self._worker, args=(folder, use_pdf),
                          daemon=True).start()
 
+    def stop(self):
+        """请求停止：立标志，识别线程在下一个检查点（每张图 / 每个目录 / 每页 PDF）收工。"""
+        if not self.running:
+            return
+        self._stop.set()
+        self.btn_stop.configure_state("disabled", "正在停止…")
+        self.lbl_stat.configure(text="正在停止…（当前图片处理完即停）")
+
     def _worker(self, folder, use_pdf):
         # ⚠️ 整体兜底：识别线程里任何未捕获异常（OCR 引擎加载失败、目录被删、
-        #    磁盘错误…）若不回报，主界面会永远停在「准备文件…」的流动进度上，
-        #    用户只能强杀进程。必须把异常递回 UI 走 error 分支恢复按钮。
+        #    磁盘错误…）若不回报，主界面会永远停在流动进度上，用户只能强杀进程。
         try:
-            prep = prepare(folder, enabled=use_pdf,
-                           log=lambda m: self.q.put(("stage", m)))
-            work = prep["work_dir"]
-            imgs = [f for f in sorted(os.listdir(work))
-                    if os.path.splitext(f)[1].lower() in IMG_EXTS and not f.startswith("_")]
-            self.q.put(("prep", prep, len(imgs)))
-            if not imgs:
-                self.q.put(("done", work, prep, 0))
+            all_dirs = collect_dirs(folder)
+            targets = [d for d in all_dirs if d["imgs"] or (use_pdf and d["pdfs"])]
+            if not all_dirs:
+                self.q.put(("warn", "该文件夹及其子文件夹里都没有找到图片或 PDF 文件。"))
                 return
-            from rapidocr_onnxruntime import RapidOCR
-            eng = RapidOCR()
-            for i, name in enumerate(imgs, 1):
-                rec = parse_image(eng, os.path.join(work, name))
-                self.q.put(("row", rec))
-                self.q.put(("progress", i, len(imgs), name))
-            self.q.put(("done", work, prep, len(imgs)))
+            if not targets:
+                self.q.put(("warn", "找到的 %d 个文件夹里只有 PDF，请勾选下面的"
+                                    "「自动把 PDF 转成图片」后再试。" % len(all_dirs)))
+                return
+            self.q.put(("dirs", len(targets)))
+            eng = None
+            done_n = 0
+            for di, d in enumerate(targets, 1):
+                if self._stop.is_set():
+                    break
+                rel, path = d["rel"], d["path"]
+                self.q.put(("dir", di, len(targets), rel))
+                prep = prepare(path, enabled=use_pdf, cancel=self._stop.is_set,
+                               log=lambda m: self.q.put(("stage", m)))
+                work = prep["work_dir"]
+                try:
+                    imgs = [f for f in sorted(os.listdir(work))
+                            if os.path.splitext(f)[1].lower() in IMG_EXTS
+                            and not f.startswith("_")]
+                except OSError:
+                    imgs = []
+                self.q.put(("prep", prep, len(imgs)))
+                recs = []
+                if imgs and not self._stop.is_set():
+                    if eng is None:
+                        self.q.put(("stage", "加载识别引擎…"))
+                        from rapidocr_onnxruntime import RapidOCR
+                        eng = RapidOCR()
+                        self.eng = eng
+                    for i, name in enumerate(imgs, 1):
+                        if self._stop.is_set():
+                            break
+                        rec = parse_image(eng, os.path.join(work, name))
+                        recs.append(rec)
+                        self.q.put(("row", rel, rec))
+                        self.q.put(("progress", di, len(targets), i, len(imgs), name))
+                stopped = self._stop.is_set()
+                copied = archive_unknown(work, recs)
+                info = None
+                if recs:
+                    try:
+                        info = export_dir(work, recs)
+                    except Exception as e:  # noqa: BLE001
+                        self.q.put(("stage", "导出 Excel 失败：%s" % e))
+                done_n += 1
+                self.q.put(("dir_done", {"rel": rel, "work": work, "prep": prep,
+                                         "recs": recs, "copied": copied,
+                                         "excel": info}))
+                if stopped:
+                    break
+            self.q.put(("stopped" if self._stop.is_set() else "all_done",
+                        done_n, len(targets)))
         except Exception as e:  # noqa: BLE001
             self.q.put(("error", "%s" % e))
 
@@ -397,8 +495,10 @@ class App:
                 msg = self.q.get_nowait()
                 kind = msg[0]
                 if kind == "row":
-                    rec = msg[1]
+                    rel, rec = msg[1], msg[2]
                     self.records.append(rec)
+                    # 表格里带上相对目录，跨子文件夹时不会张冠李戴（Excel 里仍是纯文件名）
+                    disp = rec["file"] if rel in (".", "") else "%s\\%s" % (rel, rec["file"])
                     total = f"{rec['total']:,.2f}" if rec["total"] is not None else "—"
                     tags = []
                     if not rec["ok"]:
@@ -406,14 +506,21 @@ class App:
                     elif len(self.records) % 2 == 0:
                         tags.append("odd")      # 斑马纹（失败红字优先）
                     self.tree.insert("", "end", tags=tuple(tags),
-                                     values=(rec["file"], rec["invoice_no"] or "—",
+                                     values=(disp, rec["invoice_no"] or "—",
                                              rec["date"] or "—", rec["buyer"] or "—",
                                              rec["seller"] or "—",
                                              len(rec["items"]) or "—", total,
                                              "成功" if rec["ok"] else "未识别"))
                     self._update_stats()
                 elif kind == "stage":
-                    self.lbl_stat.configure(text=msg[1][:34])
+                    self.lbl_stat.configure(text=str(msg[1])[:40])
+                elif kind == "dirs":
+                    self.lbl_out.configure(text="共 %d 个文件夹待识别" % msg[1])
+                elif kind == "dir":
+                    di, n, rel = msg[1], msg[2], msg[3]
+                    self.cur_dir = rel
+                    self.lbl_stat.configure(
+                        text=("[%d/%d] %s" % (di, n, dir_label(rel)))[:40])
                 elif kind == "prep":
                     prep, n = msg[1], msg[2]
                     self._stop_indet()
@@ -424,94 +531,130 @@ class App:
                     else:
                         self.lbl_stat.configure(text="0/%d" % n)
                 elif kind == "progress":
-                    i, n, name = msg[1], msg[2], msg[3]
+                    di, dn, i, n, name = msg[1], msg[2], msg[3], msg[4], msg[5]
                     self.progress.set_value(i * 100.0 / max(n, 1))
-                    self.lbl_stat.configure(text=f"{i}/{n}  {name[:24]}")
-                elif kind == "done":
-                    self._finish(msg[1], msg[2], msg[3])
+                    self.lbl_stat.configure(
+                        text=("[%d/%d] " % (di, dn) + f"{i}/{n}  {name[:22]}")[:40])
+                elif kind == "dir_done":
+                    self.dir_results.append(msg[1])
+                elif kind == "all_done":
+                    self._finish(msg[1], msg[2], stopped=False)
+                elif kind == "stopped":
+                    self._finish(msg[1], msg[2], stopped=True)
+                elif kind == "warn":
+                    self._recover(msg[1], soft=True)
                 elif kind == "error":
                     self._recover(msg[1])
         except queue.Empty:
             pass
         self._poll_job = self.root.after(120, self._poll)
 
-    def _recover(self, reason):
-        """识别线程异常后恢复界面（对应 _poll 的 error 分支）。"""
+    def _recover(self, reason, soft=False):
+        """线程报错 / 没有票据可识别时恢复界面（对应 _poll 的 error、warn 分支）。"""
         self.running = False
         self._stop_indet()
         self.btn_run.configure_state("normal", "开始识别")
-        self.btn_export.configure_state("normal")
+        self.btn_stop.configure_state("disabled", "停止")
+        self.btn_export.configure_state("normal" if self.dir_results else "disabled")
         self.progress.set_value(0, stopped=True)
-        self.lbl_stat.configure(text="识别失败")
+        self.lbl_stat.configure(text=str(reason)[:40])
         self._update_stats()
-        messagebox.showerror(APP_TITLE, "识别过程出错：%s\n\n"
-                             "可重试；若反复出现请把提示截图反馈。" % reason)
+        if soft:
+            messagebox.showinfo(APP_TITLE, reason)
+        else:
+            messagebox.showerror(APP_TITLE, "识别过程出错：%s\n\n"
+                                 "可重试；若反复出现请把提示截图反馈。" % reason)
 
-    def _finish(self, work, prep, img_n):
+    def _finish(self, done_dirs, total_dirs, stopped=False):
+        """全部跑完（stopped=False）或中途停止（stopped=True）后的收尾与总结。"""
         self.running = False
         self._stop_indet()
-        self.work_dir = work
         self.btn_run.configure_state("normal", "开始识别")
+        self.btn_stop.configure_state("disabled", "停止")
         self.btn_open.configure_state("normal")
-        self.progress.set_value(100.0 if img_n else 0.0, stopped=not img_n)
+        self.btn_export.configure_state("normal" if self.dir_results else "disabled")
+        # 只有一个目录时「打开所在文件夹」进它的工作目录（旧版行为）；多目录时进根目录
+        if len(self.dir_results) == 1:
+            self.work_dir = self.dir_results[0]["work"]
+        else:
+            self.work_dir = self.root_dir or self.folder.get().strip()
+
+        n = len(self.records)
+        ok_n = sum(1 for r in self.records if r["ok"])
+        fail_n = n - ok_n
+        copied = sum(d["copied"] for d in self.dir_results)
+        self.progress.set_value(done_dirs * 100.0 / total_dirs if total_dirs else 0.0,
+                                stopped=stopped or not self.records)
         self._update_stats()
 
-        if not img_n:
-            lines = ["没有可识别的图片文件。"]
-            if prep["failed"]:
-                lines.append("")
-                lines.append("以下文件未能转换（已归入「%s」）：" % UNKNOWN_DIR)
-                lines += ["  · %s（%s）" % (n, r) for n, r in prep["failed"]]
-            if prep["new_dir"]:
-                lines.append("")
-                lines.append("工作目录：%s" % work)
-            messagebox.showwarning(APP_TITLE, "\n".join(lines))
-            self.lbl_stat.configure(text="无可用图片")
-            return
+        ex_rows = [(d, d["excel"], os.path.join(d["work"], OUT_XLSX))
+                   for d in self.dir_results if d.get("excel")]
+        lines = []
+        if stopped:
+            self.lbl_stat.configure(text="已停止：完成 %d/%d 个文件夹" % (done_dirs, total_dirs))
+            lines.append("已停止：处理到第 %d/%d 个文件夹，本次成功 %d 张、未识别 %d 张。"
+                         % (done_dirs, total_dirs, ok_n, fail_n))
+            lines.append("已识别的结果全部保留；下次点「开始识别」会接着处理剩余内容"
+                         "（已转好的 PDF 页图直接复用，不会重复转换）。")
+        else:
+            self.lbl_stat.configure(text="完成：成功 %d / 未识别 %d" % (ok_n, fail_n))
+            lines.append("识别完成：共 %d 个文件夹，成功 %d 张、未识别 %d 张"
+                         "（已复制到各自的「%s」共 %d 张）。"
+                         % (len(self.dir_results), ok_n, fail_n, UNKNOWN_DIR, copied))
 
-        unknown = [r for r in self.records if not r["ok"]]
-        copied = 0
-        if unknown:
-            udir = os.path.join(work, UNKNOWN_DIR)
-            os.makedirs(udir, exist_ok=True)
-            for r in unknown:
-                src = os.path.join(work, r["file"])
-                dst = os.path.join(udir, r["file"])
-                if os.path.exists(src) and not os.path.exists(dst):
-                    try:
-                        shutil.copy2(src, dst)
-                        copied += 1
-                    except OSError:
-                        pass
-        ok_n = len(self.records) - len(unknown)
-        self.lbl_stat.configure(text="完成：成功 %d / 未识别 %d" % (ok_n, len(unknown)))
-        try:
-            info = self.export()
-            lines = [f"识别完成：成功 {ok_n} 张，未识别 {len(unknown)} 张"
-                     f"（已复制到「{UNKNOWN_DIR}」文件夹 {copied} 张）。"]
-            s = prep_summary(prep)
-            if s:
-                lines.append("")
-                lines.append("PDF 预处理：%s" % s)
-                lines.append("工作目录：%s" % work)
-            if prep["failed"]:
-                lines.append("转换失败：%s" % "；".join("%s（%s）" % (n, r) for n, r in prep["failed"]))
+        if ex_rows:
             lines.append("")
-            lines.append(f"Excel 已生成：{os.path.join(work, OUT_XLSX)}")
-            lines.append(f"票据 {info['tickets']} 张 / 明细 {info['details']} 行 / "
-                         f"价税合计 ¥{info['total']:,.2f}")
+            lines.append("Excel 已生成（每个文件夹各一份）：")
+            for d, _i, path in ex_rows[:MAX_LIST_DIRS]:
+                lines.append("  · [%s] %s" % (dir_label(d["rel"]), path))
+            if len(ex_rows) > MAX_LIST_DIRS:
+                lines.append("  · …另有 %d 个文件夹的 Excel（可点「打开所在文件夹」查看）"
+                             % (len(ex_rows) - MAX_LIST_DIRS))
+            lines.append("合计：票据 %d 张 / 明细 %d 行 / 价税合计 ¥%s"
+                         % (sum(i["tickets"] for _d, i, _p in ex_rows),
+                            sum(i["details"] for _d, i, _p in ex_rows),
+                            format(sum(i["total"] for _d, i, _p in ex_rows), ",.2f")))
+
+        pre = [s for s in (prep_summary(d["prep"]) for d in self.dir_results) if s]
+        if pre:
+            lines.append("")
+            lines.append("PDF 预处理：%s" % "；".join(pre[:MAX_LIST_DIRS]))
+
+        empty = [d for d in self.dir_results if not d["recs"]]
+        if empty:
+            lines.append("")
+            lines.append("没有可识别图片的文件夹：%s"
+                         % "、".join(dir_label(d["rel"]) for d in empty[:MAX_LIST_DIRS]))
+        bad = [(d["rel"], nm, r) for d in self.dir_results for nm, r in d["prep"]["failed"]]
+        if bad:
+            lines.append("")
+            lines.append("PDF 转换失败 %d 个（已归入各自的「%s」）：" % (len(bad), UNKNOWN_DIR))
+            for rel, nm, r in bad[:MAX_LIST_DIRS]:
+                lines.append("  · [%s] %s（%s）" % (dir_label(rel), nm, r))
+
+        if ex_rows:
+            self.lbl_out.configure(text="已导出 %d 份 Excel" % len(ex_rows))
+        if lines:
             messagebox.showinfo(APP_TITLE, "\n".join(lines))
-            self.lbl_out.configure(text=f"已导出 {OUT_XLSX}")
-        except Exception as e:
-            messagebox.showerror(APP_TITLE, f"导出 Excel 失败：{e}")
 
     def export(self):
-        folder = self.work_dir or self.folder.get().strip()
-        good = [r for r in self.records if r["ok"]]
-        out = os.path.join(folder, OUT_XLSX)
-        info = export_excel(good, out)
+        """重新导出：把本次每个文件夹的 Excel 再写一遍（只含识别成功的行）。"""
+        if not self.dir_results:
+            return None
+        bad = []
+        for d in self.dir_results:
+            if not d["recs"]:
+                continue
+            try:
+                d["excel"] = export_dir(d["work"], d["recs"])
+            except Exception as e:  # noqa: BLE001
+                bad.append("%s（%s）" % (dir_label(d["rel"]), e))
         self.btn_export.configure_state("normal")
-        return info
+        n_ex = len([d for d in self.dir_results if d.get("excel")])
+        self.lbl_out.configure(text="已重新导出 %d 份 Excel" % n_ex)
+        if bad:
+            messagebox.showerror(APP_TITLE, "以下文件夹导出失败：\n" + "\n".join(bad))
+        return [d["excel"] for d in self.dir_results if d.get("excel")]
 
 
 def _selftest(folder):

@@ -2,7 +2,9 @@
 # -*- coding: utf-8 -*-
 """PDF 预处理：把文件夹里的 PDF 逐页转成 JPG，作为 OCR 之前的前置步骤。
 
-对外只暴露一个函数 prepare(folder, enabled=True) -> dict，
+对外只暴露两个函数：
+    collect_dirs(root)          递归收集「含图片或 PDF」的全部目录（含根目录本身）
+    prepare(folder, enabled)    单个目录的 PDF -> JPG 前置准备
 返回的 work_dir 就是后续 OCR 应该处理的目录：
 
     目录里没有 PDF            -> 原样返回该文件夹，不做任何写入（纯图片场景零副作用）
@@ -49,6 +51,30 @@ def _new_pymupdf():
         return pymupdf
 
 
+def collect_dirs(root):
+    """递归收集「需要处理的目录」：只要该目录第一层含图片或 PDF 就算一个。
+
+    返回 [{"rel": 相对路径, "path": 绝对路径, "imgs": 图片数, "pdfs": PDF数}, ...]。
+    根的 rel 为 "."；顺序为目录树深度优先、同级按名称排序（根目录在最前）。
+
+    ⚠️ 必须跳过程序自己生成的产物目录，否则会把上一轮转出的页图、「未识别」里的
+    副本再识别一遍，而且会在「处理后/处理后」里无限套娃：
+      · 处理后 / 未识别（WORK_DIR / UNKNOWN_DIR，任意层级）
+      · 以 _ 开头的目录（与文件名共用同一条「跳过」约定）
+    """
+    out = []
+    for cur, dirs, _files in os.walk(root):
+        # 原地裁剪 dirs，os.walk 就不会再往这些目录里钻
+        dirs[:] = sorted(d for d in dirs
+                         if d not in (WORK_DIR, UNKNOWN_DIR)
+                         and not d.startswith(SKIP_PREFIX))
+        imgs, pdfs = scan(cur)
+        if imgs or pdfs:
+            out.append({"rel": os.path.relpath(cur, root), "path": cur,
+                        "imgs": len(imgs), "pdfs": len(pdfs)})
+    return out
+
+
 def scan(folder):
     """扫描第一层文件（与主程序口径一致：跳过 _ 开头的文件、不递归子目录）。"""
     imgs, pdfs = [], []
@@ -77,11 +103,18 @@ def zoom_for(page):
     return min(base, TARGET_WIDTH / w)
 
 
-def render_pdf(pymupdf, doc, pdf_name, out_dir):
-    """把已打开的 PDF 逐页渲染成 JPG。返回 (新增页数, 已存在跳过页数)。"""
+def render_pdf(pymupdf, doc, pdf_name, out_dir, cancel=None):
+    """把已打开的 PDF 逐页渲染成 JPG。返回 (新增页数, 已存在跳过页数)。
+
+    cancel 是个可调用对象（通常传 threading.Event.is_set）：返回 True 时立刻收工，
+    已渲染的页保留在磁盘上（下次运行按幂等规则直接复用，不会白转）。
+    一页大图渲染要好几秒，所以中断点必须精确到「每页之前」。
+    """
     stem = os.path.splitext(pdf_name)[0]
     rendered = reused = 0
     for i, page in enumerate(doc, 1):
+        if cancel and cancel():
+            break
         dst = os.path.join(out_dir, "%s_%d.jpg" % (stem, i))
         if os.path.exists(dst) and os.path.getsize(dst) > 0:
             reused += 1
@@ -93,7 +126,7 @@ def render_pdf(pymupdf, doc, pdf_name, out_dir):
     return rendered, reused
 
 
-def prepare(folder, enabled=True, log=None):
+def prepare(folder, enabled=True, log=None, cancel=None):
     """前置准备。返回 dict：
         work_dir       后续 OCR 的工作目录
         new_dir        是否使用了「处理后」目录
@@ -103,6 +136,9 @@ def prepare(folder, enabled=True, log=None):
         copied_images  复制进工作目录的原始图片数
         skipped_images 因已存在而跳过的图片数
         failed         [(文件名, 原因), ...]，也即复制到 未识别/ 的 PDF
+
+    cancel 为可调用对象（threading.Event.is_set）：返回 True 时中止剩余 PDF 的转换，
+    已转出的页保留在磁盘上，下次运行直接复用。
     """
     say = log or (lambda *a: None)
     res = {"work_dir": folder, "new_dir": False, "pdf_count": 0, "rendered": 0,
@@ -121,6 +157,9 @@ def prepare(folder, enabled=True, log=None):
 
     # 1) 原始图片一并搬进工作目录
     for name in imgs:
+        if cancel and cancel():
+            say("已请求停止，剩余图片未复制")
+            break
         dst = os.path.join(work, name)
         if os.path.exists(dst):
             res["skipped_images"] += 1
@@ -134,6 +173,9 @@ def prepare(folder, enabled=True, log=None):
     # 2) PDF 逐页转 JPG
     pymupdf = _new_pymupdf()
     for name in pdfs:
+        if cancel and cancel():
+            say("已请求停止，剩余 PDF 未转换")
+            break
         say("转换 PDF：%s" % name)
         doc = None
         try:
@@ -142,7 +184,7 @@ def prepare(folder, enabled=True, log=None):
                 raise RuntimeError("PDF 已加密，需要密码")
             if doc.page_count <= 0:
                 raise RuntimeError("PDF 没有可用的页面")
-            rendered, reused = render_pdf(pymupdf, doc, name, work)
+            rendered, reused = render_pdf(pymupdf, doc, name, work, cancel=cancel)
             res["rendered"] += rendered
             res["reused"] += reused
         except Exception as e:

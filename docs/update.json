@@ -1,16 +1,16 @@
 {
   "app": "ocr",
   "name": "发票识别汇总工具",
-  "version": "1.3.4",
-  "asset": "InvoiceOcrTool_v1.3.4.exe",
-  "notes": "## v1.3.4（2026-09-27）\n\n**问题修复**\n- 修复「自动更新之后，新打开的窗口一联网就卡住，必须关掉重开」的问题。\n\n  更新完成后，程序需要接管自己的文件名；而**改自己的名字这个动作会让该进程彻底失去联网能力**\n  （连域名解析都出不去，而且不会自行恢复），所以更新后那个窗口做什么联网操作都会卡住。\n\n  现在改为**在程序关闭时才改名**，运行期间完全不碰自己的文件名 —— 联网恢复正常。\n\n> 如果你之前遇到过「更新完就卡、重开一次又好了」，这一版就是针对它的修复。",
-  "url": "https://github.com/jianRY/invoice-ocr-tool/releases/download/v1.3.4/InvoiceOcrTool_v1.3.4.exe",
-  "fallback_url": "http://download.internal:8888/files/InvoiceOcrTool_v1.3.4.exe",
-  "release_url": "https://github.com/jianRY/invoice-ocr-tool/releases/tag/v1.3.4",
+  "version": "1.4.0",
+  "asset": "InvoiceOcrTool_v1.4.0.exe",
+  "notes": "## v1.4.0（2026-09-28）\n\n**新增：自动遍历子文件夹**\n- 选中一个文件夹后，会自动递归扫描它的全部子文件夹，逐个识别；每个含票据的文件夹\n  各自生成一份 `发票识别汇总.xlsx` 与 `未识别\\`，互不干扰\n- 程序自己生成的「处理后」「未识别」目录、以及 `_` 开头的目录会自动跳过\n  —— 重复运行不会把上一轮转换出的页图、未识别副本再识别一遍\n- 结果表格的「文件名」列带上相对目录（如 `2026-01\\票据_1.jpg`），跨文件夹一目了然；\n  Excel 里仍是纯文件名\n\n**新增：识别过程中可停止**\n- 识别中随时可点「停止」：当前图片处理完即收工，已识别的结果、已生成的 Excel、\n  已复制的未识别文件全部保留\n- 停止后进度条停在真实位置并转为琥珀色；再次点「开始识别」接着处理剩余内容\n  —— 已转好的 PDF 页图、已复制的图片自动复用，不会重复转换\n- PDF 转换阶段同样可中断（精确到每页之前），已渲染的页直接留给下次复用",
+  "url": "https://github.com/jianRY/invoice-ocr-tool/releases/download/v1.4.0/InvoiceOcrTool_v1.4.0.exe",
+  "fallback_url": "http://download.internal:8888/files/InvoiceOcrTool_v1.4.0.exe",
+  "release_url": "https://github.com/jianRY/invoice-ocr-tool/releases/tag/v1.4.0",
   "site_url": "http://download.internal:8888/",
-  "size": 127596928,
-  "sha256": "4e28536bb1ff0cf658893184a88f461c99d4aab7e7d1461b41fa53732c811926",
-  "published": "2026-09-27 21:09:59",
-  "setup_url": "https://github.com/jianRY/invoice-ocr-tool/releases/download/v1.3.4/InvoiceOcrTool_v1.3.4_setup.exe",
-  "setup_fallback_url": "http://download.internal:8888/files/InvoiceOcrTool_v1.3.4_setup.exe"
+  "size": 127603168,
+  "sha256": "ee111b6d81e13df03ee154f64613cfb91016bfce890f979ec01a563d0860b6c2",
+  "published": "2026-09-28 20:36:20",
+  "setup_url": "https://github.com/jianRY/invoice-ocr-tool/releases/download/v1.4.0/InvoiceOcrTool_v1.4.0_setup.exe",
+  "setup_fallback_url": "http://download.internal:8888/files/InvoiceOcrTool_v1.4.0_setup.exe"
 }
