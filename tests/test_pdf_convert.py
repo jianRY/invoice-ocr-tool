@@ -2,10 +2,10 @@
 """pdf_convert.py 的场景测试（造样本 + 断言），不依赖任何外部图片。
 
 跑法（需要带 pymupdf 的解释器，本项目为构建 venv）：
-    "{{USER_HOME}}/.workbuddy/binaries/python/envs/court_build_v13/Scripts/python.exe" tests/test_pdf_convert.py
+    python tests/test_pdf_convert.py
 
 附加 OCR 端到端（有真实票据图片时）：
-    ... tests/test_pdf_convert.py --images "D:\\票据样本"
+    python tests/test_pdf_convert.py --images "<票据图片目录>"
 
 合成样本用 PyMuPDF 现场画，任何机器都能跑；断言覆盖
 「纯图片零副作用 / 纯 PDF / 图文混装 / 加密 PDF / 损坏 PDF / 12 页分页命名 /

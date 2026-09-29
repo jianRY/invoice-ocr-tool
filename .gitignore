@@ -19,6 +19,10 @@ token.txt
 *.pfx
 *.pvk
 
+# 本机专属配置（含开发机绝对路径，绝不入库）
+local_config.json
+.pybuild_cache/local_config.json
+
 # 运行时 / 测试产物
 发票识别汇总.xlsx
 未识别/

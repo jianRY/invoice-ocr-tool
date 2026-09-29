@@ -51,6 +51,8 @@ import time
 import urllib.error
 import urllib.request
 
+import devconfig   # 同目录模块：本机配置读取（环境变量 -> local_config.json -> 默认值）
+
 # ---------------- 常量 ----------------
 ROOT = os.path.dirname(os.path.abspath(__file__))
 APP_PY = os.path.join(ROOT, "app.py")
@@ -58,7 +60,21 @@ CHANGELOG = os.path.join(ROOT, "CHANGELOG.md")
 INDEX_HTML = os.path.join(ROOT, "docs", "index.html")
 CACHE = os.path.join(ROOT, ".pybuild_cache")
 DIST = os.path.join(ROOT, "dist")
-DELIVERY = r"{{DEV_ROOT}}\杂项\发票识别汇总工具"
+
+# ---------------- 本机专属配置（不入库） ----------------
+# 仓库里**只放相对路径与通用默认值**：凡与开发机绑定的绝对路径
+# （构建用 venv、签名脚本、Inno Setup、交付目录…）一律走 devconfig 的取值链：
+#     ① 环境变量                          —— 临时覆盖，优先级最高
+#     ② .pybuild_cache/local_config.json   —— 本机长期配置，已被 .gitignore 排除
+#     ③ 下面的通用默认值 / 相对路径        —— 换台机器也能直接跑
+# 目的：公开仓库里搜不到任何开发机信息（用户名、目录结构、其他项目位置）。
+# 各配置项含义见 local_config.example.json。
+_cfg = devconfig.get
+
+# 交付目录（两个 exe + 使用说明一起放）
+# 默认 = 源码目录的兄弟目录「杂项/发票识别汇总工具」（本项目交付位置本来就是这样）。
+DELIVERY = _cfg("OCRTOOL_DELIVERY", "delivery_dir",
+                os.path.normpath(os.path.join(ROOT, os.pardir, "杂项", "发票识别汇总工具")))
 
 OWNER_REPO = "jianRY/invoice-ocr-tool"
 REPO_URL = "https://github.com/" + OWNER_REPO
@@ -73,9 +89,13 @@ SERVER_FILES = SITE_URL + "/files"
 APP_KEY = "ocr"
 UPDATE_JSON = os.path.join(ROOT, "docs", "update.json")
 
-# 含 tkinter 的构建 venv（managed venv 打不出 tkinter）
-PY = r"{{USER_HOME}}/.workbuddy/binaries/python/envs/court_build_v13/Scripts/python.exe"
-PYINSTALLER = r"{{USER_HOME}}/.workbuddy/binaries/python/envs/court_build_v13/Scripts/pyinstaller.exe"
+# 构建用的解释器：默认用「当前正在跑本脚本的解释器」——发版时本来就是拿那个
+# 带 tkinter 的 venv 运行。⚠️ 本机请务必在 local_config.json 里写 "python"：
+# 打包要求该解释器带 tkinter，缺了会打出没有界面的废件。
+PY = _cfg("OCRTOOL_PY", "python", sys.executable)
+PYINSTALLER = _cfg("OCRTOOL_PYINSTALLER", "pyinstaller",
+                   os.path.join(os.path.dirname(PY),
+                                "pyinstaller.exe" if os.name == "nt" else "pyinstaller"))
 def _pick_git():
     """挑一个真能用的 git。
 
@@ -90,12 +110,34 @@ def _pick_git():
               r"C:\Program Files (x86)\Git\cmd\git.exe"):
         if os.path.exists(c):
             return c
-    return r"{{USER_HOME}}\.workbuddy\binaries\PortableGit\versions\1.2.0\mingw64\bin\git.exe"
+    # 兜底：从 PATH 找。不要把便携版路径写死 —— 那会把开发机用户名带进公开仓库。
+    return shutil.which("git") or "git"
 
 
 GIT = _pick_git()
-WCRED = r"{{USER_HOME}}\.workbuddy\binaries\PortableGit\versions\1.2.0\mingw64\bin\git-credential-wincred.exe"
-SIGN_PY = r"{{DEV_ROOT}}\诉讼案件网站\.pybuild_cache\signing\sign.py"
+
+
+def _pick_wincred():
+    """从系统 Git 的安装位置推导 wincred helper —— 不写死任何本机路径。
+
+    系统 Git 布局固定：<git_root>\\cmd\\git.exe
+                 与 <git_root>\\mingw64\\libexec\\git-core\\git-credential-wincred.exe
+    """
+    if not GIT:
+        return ""
+    cand = os.path.join(os.path.dirname(os.path.dirname(GIT)),
+                        "mingw64", "libexec", "git-core",
+                        "git-credential-wincred.exe")
+    return cand if os.path.exists(cand) else ""
+
+
+# 取 PAT 的 helper（wincred）：默认从系统 Git 位置推导
+WCRED = _cfg("OCRTOOL_WCRED", "wincred", _pick_wincred())
+
+# 代码签名脚本：默认在项目自己的 .pybuild_cache/signing/ 下找；
+# 本机若用外部共享的签名脚本，在 local_config.json 写 "sign_py" 指过去。
+SIGN_PY = _cfg("OCRTOOL_SIGN_PY", "sign_py",
+               os.path.join(CACHE, "signing", "sign.py"))
 # ⚠️ 代理不再硬编码（2026-09-22 重构）：
 #    原先写死 127.0.0.1:10808，该代理一关或换端口，发版就会卡在最后一步 git push 上
 #    —— 打包/签名/元数据全做完了才失败，最亏的一步。
@@ -104,13 +146,28 @@ SIGN_PY = r"{{DEV_ROOT}}\诉讼案件网站\.pybuild_cache\signing\sign.py"
 #    现在由 pick_proxy() 在发版开始时**实测**挑选，None 表示直连。
 PROXY = None
 
-ISCC_CANDIDATES = [
-    r"{{USER_HOME}}\.workbuddy\tools\InnoSetup7\ISCC.exe",
-    r"{{USER_HOME}}\.workbuddy\tools\InnoSetup6\ISCC.exe",
-    r"{{DEV_ROOT}}\杂项\.workbuddy\invoice_tool\innosetup\ISCC.exe",
-    r"C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
-    r"C:\Program Files\Inno Setup 7\ISCC.exe",
-]
+# Inno Setup 编译器：本机安装位置走配置，仓库里只留通用安装路径。
+ISCC_CANDIDATES = ([_cfg("OCRTOOL_ISCC", "iscc")] +
+                   [r"C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
+                    r"C:\Program Files\Inno Setup 7\ISCC.exe",
+                    r"C:\Program Files\Inno Setup 6\ISCC.exe"])
+
+# ---------------- 敏感信息闸门（提交前扫描暂存内容） ----------------
+# ⚠️ 本仓库是公开的：开发机信息/凭据一旦推上去，历史就洗不掉（要 force push
+#    重写历史、所有协作者重新 clone）。所以命中时是**中止发版**，不是警告。
+SENSITIVE_RULES = (
+    (r"[Cc]:[\\/]+Users[\\/]+[A-Za-z0-9_.\-]{2,}", "本机用户目录"),
+    (r"(?i)[a-z]:[\\/]+workbuddy[\\/]", "本地开发盘路径"),
+    (r"(?i)\bgh[pousr]_[A-Za-z0-9]{20,}\b", "GitHub 令牌"),
+    (r"-----BEGIN [A-Z ]*PRIVATE KEY-----", "私钥内容"),
+    (r"(?i)\b(password|passwd|pwd|secret|api[_-]?key)\s*[=:]\s*[\"'][^\"'\s]{8,}[\"']",
+     "疑似硬编码凭据"),
+)
+# 不该出现在公开仓库里的文件名
+SENSITIVE_PATHS = (r"(?i)\.(pfx|pvk|pem|key)$", r"(?i)token\.txt$",
+                   r"(?i)local_config\.json$", r"(?i)^\.env")
+# 放行：模板 / 占位符（不是真值）
+SENSITIVE_ALLOW = (r"x-access-token:%s@", r"[Cc]:[\\/]+Users[\\/]+<")
 
 APP_NAME = "发票识别汇总工具"
 
@@ -669,9 +726,48 @@ def git(*args, check=True):
     return run([GIT] + list(args), cwd=ROOT, check=check, env=git_env(PROXY))
 
 
+def scan_staged_sensitive():
+    """扫描暂存内容，命中开发机信息/凭据就返回告警列表（空列表 = 干净）。
+
+    只看 diff 的新增行（`+` 开头），避免被历史内容反复报错；
+    文件名单独查一遍，防止 *.pfx / token.txt / local_config.json 被误加进来。
+    """
+    hits = []
+    names = run([GIT, "diff", "--cached", "--name-only"],
+                check=False, env=git_env(PROXY)).stdout or ""
+    for n in names.splitlines():
+        n = n.strip().strip('"')
+        if n and any(re.search(p, n) for p in SENSITIVE_PATHS):
+            hits.append(("不该入库的文件", n))
+    diff = run([GIT, "diff", "--cached", "-U0"],
+               check=False, env=git_env(PROXY)).stdout or ""
+    for line in diff.splitlines():
+        if not line.startswith("+") or line.startswith("+++"):
+            continue
+        body = line[1:]
+        if any(re.search(a, body) for a in SENSITIVE_ALLOW):
+            continue
+        for pat, label in SENSITIVE_RULES:
+            for m in re.finditer(pat, body):
+                hits.append((label, m.group(0)[:70]))
+    return hits
+
+
 def git_commit_tag_push(ver, token):
     log("git 提交 + 打 tag…")
     git("add", "-A")
+    # ⚠️ 公开仓库的硬闸门：提交前扫一遍，命中就停。宁可这次不发，也不漏出去。
+    if not os.environ.get("OCRTOOL_SKIP_SCAN"):
+        hits = scan_staged_sensitive()
+        if hits:
+            log("!! 暂存内容命中敏感信息，已中止发版（共 %d 处）：" % len(hits))
+            for label, seg in hits[:20]:
+                log("   · %s -> %s" % (label, seg))
+            if len(hits) > 20:
+                log("   … 另有 %d 处" % (len(hits) - 20))
+            log("   修掉后重新发版；确认是误报可临时设 OCRTOOL_SKIP_SCAN=1 跳过。")
+            raise SystemExit("敏感信息闸门拦截")
+        log("  敏感信息闸门：通过")
     st = git("status", "--short").stdout.strip()
     if not st:
         log("  无文件变更，跳过 commit")

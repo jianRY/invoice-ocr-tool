@@ -1,0 +1,11 @@
+{
+  "_comment": "本机配置模板。复制到 .pybuild_cache/local_config.json 后按需填写；那个路径已被 .gitignore 排除。",
+  "_comment2": "所有项都可以省略：省略时 release.py 用「当前解释器 / 相对路径 / 项目内 .pybuild_cache/signing/」兜底。",
+
+  "delivery_dir": "<交付目录绝对路径，省略则用源码目录的兄弟目录「杂项/发票识别汇总工具」>",
+  "python": "<带 tkinter 的解释器绝对路径，省略则用当前运行 release.py 的解释器>",
+  "pyinstaller": "<pyinstaller.exe 绝对路径，省略则在 python 同目录下找>",
+  "sign_py": "<代码签名脚本绝对路径，省略则找项目内 .pybuild_cache/signing/sign.py>",
+  "iscc": "<Inno Setup 的 ISCC.exe 绝对路径，省略则只找 Program Files 下的标准安装位置>",
+  "wincred": "<git-credential-wincred.exe 绝对路径，省略则从系统 Git 安装位置推导>"
+}
