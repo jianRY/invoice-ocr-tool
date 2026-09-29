@@ -5,25 +5,25 @@
 
 为什么优先走 GitHub 加速镜像（2026-09-22）：
     实测裸网直连 GitHub 只有 3.7 KB/s（基本等于不可用），而公共加速镜像能到
-    439 KB/s。于是检查更新与下载都优先走镜像，**自有下载站退到兜底位置**
+    439 KB/s。于是检查更新与下载都优先走镜像，**备用下载源退到兜底位置**
     （自建国内下载站，地址见 _endpoints.py），只在镜像与原站都不可用时才用。
 
 检查更新的来源（依次尝试，任一成功即停）：
     ① 加速镜像 + Release 附件 update.json   —— 最快，且带 sha256/size
     ② GitHub 原站 Release 附件 update.json
-    ③ 自有服务器 /updates/ocr.json           —— 兜底
+    ③ 备用源 /updates/ocr.json           —— 兜底
     ④ GitHub API releases/latest            —— 最后兜底（不返回 sha256）
 
 下载的来源（update.json 给出候选后，客户端再展开镜像并择优）：
     ① 加速镜像 ×3 —— 下载前并发探测量 256KB，按实测速度从快到慢
     ② GitHub Release 原站直链
-    ③ 自有服务器直链                          —— 兜底
+    ③ 备用源直链                          —— 兜底
 
 update.json 由发版脚本 release.py 生成并随 Release 上传，字段：
     {"app","version","notes","url","fallback_url","release_url",
      "asset","size","sha256","published"}
     url          = GitHub Release 直链（主）
-    fallback_url = 自有服务器直链（兜底）
+    fallback_url = 备用源直链（兜底）
 
 功能：
     1. 启动后台静默检查（失败不打扰用户）
@@ -76,7 +76,7 @@ UA = (
 #      写进元数据的话，换一次镜像就要把所有仓库的 update.json 重发一遍。
 #   ② 探测失败的源一律**不丢弃**，只排到最后继续尝试：探测失败 ≠ 不能下载
 #      （可能只是当时的网络抖动，或该镜像不响应 Range 请求）。
-#   ③ GitHub 原站与自有服务器直链永远保留在候选列表里兜底，
+#   ③ GitHub 原站与备用源直链永远保留在候选列表里兜底，
 #      任何镜像全挂的情况下都还能更新。
 MIRROR_PREFIXES = (
     "https://gh-proxy.com/",
@@ -91,7 +91,7 @@ MIN_USEFUL_SPEED = 50 * 1024    # B/s：低于此速度视为「探不到」，�
 # ---------------- 本工具专属配置（换工具只改这一段） ----------------
 APP_KEY = "ocr"
 APP_NAME = "发票识别汇总工具"
-# 自有站地址不写死在公开仓库里（客户端要连它，地址本身不是秘密，
+# 备用源地址不写死在公开仓库里（客户端要连它，地址本身不是秘密，
 # 但不给抓源码的人省事）。本机放 _endpoints.py；缺失则该源自动禁用。
 try:
     from _endpoints import SITE_URL          # 本机私有，.gitignore 已排除
@@ -185,7 +185,7 @@ def order_download_urls(urls, timeout=PROBE_TIMEOUT, log_fn=None):
 
     展开规则：
       · GitHub 直链 → 生成全部镜像版本作为**加速候选**放前面，原链留作兜底
-      · 非 GitHub 地址（自有服务器直链）→ 一律排**最后**，只作兜底
+      · 非 GitHub 地址（备用源直链）→ 一律排**最后**，只作兜底
       · 去重保序
 
     返回顺序 = 实际尝试顺序。下载前会并发探测各加速候选的速度并按快慢重排；
@@ -205,9 +205,9 @@ def order_download_urls(urls, timeout=PROBE_TIMEOUT, log_fn=None):
         if _is_github_url(u):
             for m in _mirror_variants(u):
                 _add(fast, m)
-            _add(gh_tail, u)       # GitHub 原站：排在镜像之后、自有服务器之前
+            _add(gh_tail, u)       # GitHub 原站：排在镜像之后、备用源之前
         else:
-            _add(other, u)         # 自有服务器：**永远最后兜底**（不随元数据字段顺序漂移）
+            _add(other, u)         # 备用源：**永远最后兜底**（不随元数据字段顺序漂移）
 
     if not fast:
         return gh_tail + other     # 没有可加速的源，直接用原顺序（不白等一次探测）
@@ -373,7 +373,7 @@ def _from_github_api(timeout=15):
 
 
 def _meta_candidates():
-    """检查更新的元数据候选源，按「GitHub 加速镜像 → GitHub 原站 → 自有服务器」排序。
+    """检查更新的元数据候选源，按「GitHub 加速镜像 → GitHub 原站 → 备用源」排序。
 
     为什么 update.json 必须排在 GitHub API 之前：
         只有 update.json 带 sha256 / size，是完整性校验的唯一依据；
@@ -394,12 +394,12 @@ def _meta_candidates():
     for m in _mirror_variants(RELEASE_UPDATE_JSON):
         _add(m, _source_label(m))
     _add(RELEASE_UPDATE_JSON, _source_label(RELEASE_UPDATE_JSON))
-    _add(SERVER_UPDATE_JSON, "自有服务器")
+    _add(SERVER_UPDATE_JSON, "备用源")
     return out
 
 
 def fetch_update_info(timeout=5, log_fn=None):
-    """按「加速镜像 → GitHub 原站 → 自有服务器 → GitHub API」依次尝试，返回更新信息或 None。
+    """按「加速镜像 → GitHub 原站 → 备用源 → GitHub API」依次尝试，返回更新信息或 None。
 
     timeout 默认 5 秒：候选共 5 个，最坏全挂要等约 25 秒；但正常情况下
     第一个源不到 1 秒就能返回（后台静默检查跑在独立线程，不会卡住界面）。
@@ -994,13 +994,13 @@ class DownloadProgressDialog(tk.Toplevel):
                            "%s_更新.exe" % re.sub(r"\W+", "_", self._app_name))
         last_err = None
         # 先展开 + 并发测速择优：加速镜像按实测速度排序在前，
-        # GitHub 原站与自有服务器直链留在后面兜底（见 order_download_urls）
+        # GitHub 原站与备用源直链留在后面兜底（见 order_download_urls）
         self._set_title("正在选择最快的下载源…")
         try:
             self._urls = order_download_urls(self._urls, log_fn=self._log_fn)
         except Exception:  # noqa: BLE001
             pass        # 择优本身失败就用原顺序，绝不能因此让更新走不下去
-        # 多源依次尝试：加速镜像（快→慢）→ GitHub 原站 → 自有服务器
+        # 多源依次尝试：加速镜像（快→慢）→ GitHub 原站 → 备用源
         for idx, url in enumerate(self._urls, 1):
             if self._cancel_evt.is_set():
                 break

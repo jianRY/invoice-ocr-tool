@@ -19,7 +19,7 @@
   python release.py --no-push           # commit+tag 但只留本地
   python release.py --no-verify-page    # 跳过发版后的线上展示页校验
 
-约定（项目组 2026-09-16 指令）：本工具每次有改动均自动发布新版本，无需等指令。
+约定：本工具每次有改动均自动发布新版本，无需等指令。
 每次发版要走完下面三步（本脚本已全部固化，别绕过）：
 
   1) 网页同步 —— 展示页内容必须与本版数据一致：版本号、两个下载链接、页脚版本
@@ -80,7 +80,7 @@ OWNER_REPO = "jianRY/invoice-ocr-tool"
 REPO_URL = "https://github.com/" + OWNER_REPO
 MAIN_BRANCH = "main"
 
-# 自有下载站（地址放本机配置 .pybuild_cache/local_config.json，见 devconfig）：
+# 备用下载源（地址放本机配置 .pybuild_cache/local_config.json，见 devconfig）：
 #   /files/<资产名>      —— 双 exe 由服务器定时脚本从 Release 镜像过来
 #   /updates/<app>.json  —— 由本脚本生成的 docs/update.json 抄过去
 # 客户端自动更新优先读它，读不到再回退 GitHub（raw → API）。
@@ -593,11 +593,11 @@ def write_update_json(ver, onefile, installer):
 
     ⚠️ 字段语义 2026-09-22 调换过，别改回去：
       url          = GitHub Release 直链（**主源**，客户端会再展开成各加速镜像择优）
-      fallback_url = 自有服务器直链（**兜底**，只在镜像与原站都不可用时才用）
+      fallback_url = 备用源直链（**兜底**，只在镜像与原站都不可用时才用）
 
     为什么从「服务器优先」调回「GitHub 优先」：
       实测裸网直连 GitHub 只有 3.7 KB/s，而公共加速镜像能到 439 KB/s ——
-      比自有服务器（阿里云 ECS 固定带宽，445 KB/s 封顶）不慢，还不用维护同步。
+      比备用源（阿里云 ECS 固定带宽，445 KB/s 封顶）不慢，还不用维护同步。
     调换后新旧客户端都能正确工作：两边都是「按 url → fallback_url 顺序试」。
 
     另带 sha256 / size，客户端下载完校验完整性，杜绝半截包当新版装上。
@@ -800,7 +800,7 @@ def git_commit_tag_push(ver, token):
 
 
 # ---------------- 交付 ----------------
-# 「下载（推荐）」置顶区块：发版时自动补/刷新，保证交付出去的使用说明永远带自有服务器地址。
+# 「下载（推荐）」置顶区块：发版时自动补/刷新，保证交付出去的使用说明永远带备用源地址。
 #
 # ⚠️ 区块内容里**绝不能出现 "MB" 字样**：本脚本用
 #    re.sub(r"[\d.]+ MB", …, count=len(sizes)) 刷 exe 体积，只替换前 N 处匹配；
@@ -830,8 +830,8 @@ def ensure_server_top(manual):
 
 def copy_delivery(onefile, installer, ver):
     os.makedirs(DELIVERY, exist_ok=True)
-    # ⚠️ 交付文件名必须带版本号（项目组 2026-09-24 要求）：放桌面/U 盘一眼看出版本，
-    #    不会新旧两个文件名一样分不清。GitHub Release 资产名保持 ASCII（宝塔同步链依赖）。
+    # ⚠️ 交付文件名必须带版本号（定稿约定）：放桌面/U 盘一眼看出版本，
+    #    不会新旧两个文件名一样分不清。GitHub Release 资产名保持 ASCII（同步链依赖）。
     pairs = [(onefile, "%s_v%s_单文件版.exe" % (APP_NAME, ver))]
     if installer:
         pairs.append((installer, "%s_v%s_安装版.exe" % (APP_NAME, ver)))
