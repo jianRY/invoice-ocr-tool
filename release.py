@@ -80,11 +80,11 @@ OWNER_REPO = "jianRY/invoice-ocr-tool"
 REPO_URL = "https://github.com/" + OWNER_REPO
 MAIN_BRANCH = "main"
 
-# 自有下载站（阿里云 download.internal，见「更新源」项目）：
+# 自有下载站（地址放本机配置 .pybuild_cache/local_config.json，见 devconfig）：
 #   /files/<资产名>      —— 双 exe 由服务器定时脚本从 Release 镜像过来
 #   /updates/<app>.json  —— 由本脚本生成的 docs/update.json 抄过去
 # 客户端自动更新优先读它，读不到再回退 GitHub（raw → API）。
-SITE_URL = "http://download.internal:8888"
+SITE_URL = _cfg("OCRTOOL_SITE_URL", "site_url", "")     # 本机配置，仓库里不留真地址
 SERVER_FILES = SITE_URL + "/files"
 APP_KEY = "ocr"
 UPDATE_JSON = os.path.join(ROOT, "docs", "update.json")

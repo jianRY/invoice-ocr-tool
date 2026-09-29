@@ -8,7 +8,7 @@
 
 ## 下载
 
-> **国内用户推荐走国内下载站**：<http://download.internal:8888/>
+> **国内用户**：软件内置国内加速下载源，无需手动选线路
 > 阿里云直连，速度快、不用访问 GitHub。软件自带的自动更新也优先走这台服务器。
 
 也可以到 [**Releases**](https://github.com/jianRY/invoice-ocr-tool/releases/latest) 下载最新版：
@@ -27,7 +27,7 @@
 
 检查与下载都是**双源**，依次尝试：
 
-1. 自有服务器 `http://download.internal:8888/updates/ocr.json`（快）
+1. 自建国内下载站的更新元数据（快）
 2. GitHub raw / GitHub API + Release 直链（服务器不可用时兜底）
 
 下载完成会校验 SHA256。更新方式是「就地替换」——新版放进程序目录并接管原文件名，

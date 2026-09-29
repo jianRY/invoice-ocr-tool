@@ -6,7 +6,7 @@
 为什么优先走 GitHub 加速镜像（2026-09-22）：
     实测裸网直连 GitHub 只有 3.7 KB/s（基本等于不可用），而公共加速镜像能到
     439 KB/s。于是检查更新与下载都优先走镜像，**自有下载站退到兜底位置**
-    （http://download.internal:8888/），只在镜像与原站都不可用时才用。
+    （自建国内下载站，地址见 _endpoints.py），只在镜像与原站都不可用时才用。
 
 检查更新的来源（依次尝试，任一成功即停）：
     ① 加速镜像 + Release 附件 update.json   —— 最快，且带 sha256/size
@@ -91,7 +91,13 @@ MIN_USEFUL_SPEED = 50 * 1024    # B/s：低于此速度视为「探不到」，�
 # ---------------- 本工具专属配置（换工具只改这一段） ----------------
 APP_KEY = "ocr"
 APP_NAME = "发票识别汇总工具"
-SERVER_UPDATE_JSON = "http://download.internal:8888/updates/%s.json" % APP_KEY
+# 自有站地址不写死在公开仓库里（客户端要连它，地址本身不是秘密，
+# 但不给抓源码的人省事）。本机放 _endpoints.py；缺失则该源自动禁用。
+try:
+    from _endpoints import SITE_URL          # 本机私有，.gitignore 已排除
+except Exception:
+    SITE_URL = ""
+SERVER_UPDATE_JSON = ("%s/updates/%s.json" % (SITE_URL, APP_KEY)) if SITE_URL else ""
 # Release 附件里的 update.json（发版脚本 upload 时固定叫这个名字）——
 # 它同时带 sha256 与 size，是唯一能支撑完整性校验的元数据源，故优先于 GitHub API。
 RELEASE_UPDATE_JSON = (
@@ -890,7 +896,8 @@ class UpdateDialog(tk.Toplevel):
 
     def _on_open_page(self):
         """安装版：不自动替换，直接打开下载页（服务器站点，国内快）。"""
-        url = self._html_url or "http://download.internal:8888/"
+        url = self._html_url or SITE_URL or \
+            "https://github.com/jianRY/invoice-ocr-tool/releases/latest"
         try:
             import webbrowser
             webbrowser.open(url)

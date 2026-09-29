@@ -28,3 +28,6 @@ local_config.json
 未识别/
 _pid.txt
 tests/_out/
+
+# 本机私有端点（源站地址等，绝不入库）
+_endpoints.py
