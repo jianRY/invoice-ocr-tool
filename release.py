@@ -611,17 +611,16 @@ def write_update_json(ver, onefile, installer):
         "asset": asset,
         "notes": changelog_section(ver),
         "url": "%s/releases/download/v%s/%s" % (REPO_URL, ver, asset),
-        "fallback_url": "%s/%s" % (SERVER_FILES, asset),
         "release_url": "%s/releases/tag/v%s" % (REPO_URL, ver),
-        "site_url": SITE_URL + "/",
         "size": os.path.getsize(src) if src else 0,
         "sha256": _sha256(src) if src else "",
         "published": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
+    # ⚠️ 不写入 fallback_url / site_url：update.json 是**随 Release 公开的资产**，
+    #    把私有更新地址写进去等于把它公开。客户端只走 url（GitHub 直链）+ 加速镜像。
     if installer and os.path.exists(installer):
         sn = os.path.basename(installer)
         data["setup_url"] = "%s/releases/download/v%s/%s" % (REPO_URL, ver, sn)
-        data["setup_fallback_url"] = "%s/%s" % (SERVER_FILES, sn)
     os.makedirs(os.path.dirname(UPDATE_JSON), exist_ok=True)
     with open(UPDATE_JSON, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
