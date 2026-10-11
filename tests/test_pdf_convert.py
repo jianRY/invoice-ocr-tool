@@ -23,7 +23,8 @@ sys.path.insert(0, ROOT)
 
 import pymupdf  # noqa: E402
 from pdf_convert import (  # noqa: E402
-    TARGET_WIDTH, UNKNOWN_DIR, WORK_DIR, prepare, zoom_for,
+    TARGET_WIDTH, UNKNOWN_DIR, WORK_DIR, file_targets, prepare, prepare_file,
+    prepare_target, zoom_for,
 )
 
 CASE_ROOT = os.path.join(ROOT, ".pybuild_cache", "pdftest_%s" % time.strftime("%Y%m%d_%H%M%S"))
@@ -272,8 +273,115 @@ def main():
     check("超大页面(1909pt) 被限宽", round(zoom_for(FakePage(1909)) * 1909, 1),
           round(float(TARGET_WIDTH), 1))
 
+    print("\n[11] 直接添加文件：file_targets 归一化与去重")
+    png = os.path.join(CASE_ROOT, "合成票据.png")
+    fd = os.path.join(CASE_ROOT, "case_file")
+    os.makedirs(fd)
+    _doc = pymupdf.open()
+    for i in range(2):
+        synth_page(_doc, "0017683%02d" % i, "2025年08月11日")
+    _doc.save(os.path.join(fd, "直接票据.pdf"))
+    _doc.close()
+    shutil.copy2(png, os.path.join(fd, "直接图片.png"))
+    os.makedirs(os.path.join(fd, "子目录"), exist_ok=True)
+    shutil.copy2(png, os.path.join(fd, "子目录", "深层图片.png"))
+
+    targets = file_targets([
+        os.path.join(fd, "直接票据.pdf"),
+        os.path.join(fd, "直接票据.pdf"),          # 重复选择 → 去重
+        os.path.join(fd, "直接图片.png"),
+        os.path.join(fd, "直接图片.png"),          # 同目录重复 → 只登记一次
+        os.path.join(fd, "不存在.pdf"),            # 不存在 → 跳过
+    ])
+    check("目标数=2", len(targets), 2)
+    check("首个是 PDF 目标", targets[0]["kind"], "pdf")
+    check("PDF 目标文件夹名", os.path.basename(targets[0]["path"]), "直接票据")
+    check("次个是目录目标", targets[1]["kind"], "dir")
+    check("目录目标只数第一层图片", targets[1]["imgs"], 1)   # 不含 子目录/深层图片.png
+
+    print("\n[12] 直接添加 PDF：同级同名文件夹 + 逐页转图 + 幂等复用")
+    t = targets[0]
+    prep = prepare_file(t["src"], log=lambda m: print("     ", m))
+    out = os.path.join(fd, "直接票据")
+    check("work_dir=同级同名文件夹", prep["work_dir"], out)
+    check("created=True", prep["created"], True)
+    check("new_dir=True", prep["new_dir"], True)
+    check("rendered=2", prep["rendered"], 2)
+    check("无失败", prep["failed"], [])
+    check("文件夹内容", sorted(os.listdir(out)), ["直接票据_1.jpg", "直接票据_2.jpg"])
+    check("原 PDF 仍在原位", os.path.isfile(t["src"]), True)
+    _w, _h = jpg_size(os.path.join(out, "直接票据_1.jpg"))
+    check("宽度受控", _w <= TARGET_WIDTH, True)
+
+    prep2 = prepare_file(t["src"])
+    check("复用：created=False", prep2["created"], False)
+    check("复用：rendered=0", prep2["rendered"], 0)
+    check("复用：reused=2", prep2["reused"], 2)
+
+    print("\n[13] 异常：目标名被同名文件占用 → 不创建、给明确原因")
+    occ = os.path.join(CASE_ROOT, "case_occ")
+    os.makedirs(occ)
+    _doc = pymupdf.open()
+    synth_page(_doc, "0017684001", "2025年08月11日")
+    _doc.save(os.path.join(occ, "占位.pdf"))
+    _doc.close()
+    with open(os.path.join(occ, "占位"), "wb") as f:   # 同名「文件」挡路
+        f.write(b"x")
+    prep = prepare_file(os.path.join(occ, "占位.pdf"))
+    check("有明确原因", bool(prep["reason"]), True)
+    check("未创建文件夹", os.path.isdir(os.path.join(occ, "占位")), False)
+    check("failed 记 1 条", len(prep["failed"]), 1)
+
+    print("\n[14] 异常：加密 / 损坏 PDF（直接添加）")
+    enc = os.path.join(CASE_ROOT, "case_encfile")
+    os.makedirs(enc)
+    e = pymupdf.open()
+    e.new_page()
+    e.save(os.path.join(enc, "加密单件.pdf"), encryption=pymupdf.PDF_ENCRYPT_AES_256,
+           owner_pw="o", user_pw="123")
+    e.close()
+    prep = prepare_file(os.path.join(enc, "加密单件.pdf"))
+    check("加密：有原因", bool(prep["reason"]), True)
+    check("加密：归集到未识别", files(os.path.join(enc, "加密单件"), UNKNOWN_DIR),
+          ["加密单件.pdf"])
+
+    brk = os.path.join(CASE_ROOT, "case_brkfile")
+    os.makedirs(brk)
+    with open(os.path.join(brk, "坏文件.pdf"), "wb") as f:
+        f.write(b"%PDF-1.7 broken")
+    prep = prepare_file(os.path.join(brk, "坏文件.pdf"))
+    check("损坏：有原因", bool(prep["reason"]), True)
+    check("损坏：归集到未识别", files(os.path.join(brk, "坏文件"), UNKNOWN_DIR),
+          ["坏文件.pdf"])
+
+    print("\n[15] prepare_target 分发：PDF 目标 / 目录目标")
+    pf = prepare_target({"kind": "pdf", "src": os.path.join(fd, "直接票据.pdf")})
+    check("PDF 目标 → prepare_file", os.path.basename(pf["work_dir"]), "直接票据")
+    pd_ = prepare_target({"kind": "dir", "path": os.path.join(CASE_ROOT, "case_purepdf")},
+                         enabled=True)
+    check("目录目标 → prepare", os.path.basename(pd_["work_dir"]), WORK_DIR)
+
+    print("\n[16] 边界：原图与 PDF 页图同名时，页图必须赢（不得被原图顶替）")
+    col = os.path.join(CASE_ROOT, "case_collide")
+    os.makedirs(col)
+    _doc = pymupdf.open()
+    synth_page(_doc, "0017685001", "2025年08月11日")
+    _doc.save(os.path.join(col, "撞名.pdf"))
+    _doc.close()
+    _small = pymupdf.open()
+    _small.new_page(width=200, height=100)
+    _small[0].get_pixmap(dpi=60).save(os.path.join(col, "撞名_1.jpg"))
+    _small.close()
+    r = prepare(col)
+    work = os.path.join(col, WORK_DIR)
+    check("页图已渲染", r["rendered"], 1)
+    check("无失败", r["failed"], [])
+    check("给出同名提醒", len(r["warn"]) >= 1, True)
+    _w, _h = jpg_size(os.path.join(work, "撞名_1.jpg"))
+    check("留下的是 PDF 页图而不是那张小原图", _w > 800, True)
+
     if args.images and os.path.isdir(args.images):
-        print("\n[11] OCR 端到端（真实样本：%s）" % args.images)
+        print("\n[17] OCR 端到端（真实样本：%s）" % args.images)
         run_ocr(args.images)
 
     print("\n" + "=" * 56)

@@ -29,9 +29,10 @@ from tkinter import filedialog, font as tkfont, messagebox, ttk
 import autoupdate
 from excel_out import export_excel
 from parser import IMG_EXTS, parse_image
-from pdf_convert import (WORK_DIR, collect_dirs, prepare, summary as prep_summary)
+from pdf_convert import (WORK_DIR, collect_dirs, file_targets, prepare,
+                         prepare_target, summary as prep_summary)
 
-VERSION = "1.4.1"
+VERSION = "1.5.0"
 APP_TITLE = f"发票识别汇总工具 v{VERSION}"
 OUT_XLSX = "发票识别汇总.xlsx"
 UNKNOWN_DIR = "未识别"
@@ -111,9 +112,9 @@ class App:
         self.dir_results = []        # 每个目录一条：{rel, work, prep, recs, copied, excel}
         self.folder = tk.StringVar()
         self.root_dir = ""           # 用户选中的根目录
+        self.files = []              # 「直接选择文件」入口选中的文件（绝对路径）
+        self.mode = "folder"         # folder = 文件夹导入；files = 文件导入
         self.work_dir = None         # 单个目录时=该目录的工作目录；多目录时=根目录
-        self.cur_dir = "."           # 正在处理的目录（相对根目录）
-        self.eng = None              # OCR 引擎，跨目录复用（加载一次很贵）
         self.running = False
         self._stop = threading.Event()
         self._closing = False
@@ -220,13 +221,17 @@ class App:
         c_folder.pack(fill="x", padx=K.u(16))
         row1 = tk.Frame(c_folder.body, bg=sk.card)
         row1.pack(fill="x")
-        tk.Label(row1, text="票据文件夹", font=K.f(9), fg=sk.muted,
+        tk.Label(row1, text="票据文件夹 / 文件", font=K.f(9), fg=sk.muted,
                  bg=sk.card).pack(side="left")
         self.ent = ttk.Entry(row1, style="P.TEntry", textvariable=self.folder)
         self.ent.pack(side="left", fill="x", expand=True, padx=K.u(8))
         self.btn_browse = self._btn(row1, "浏览…", self.pick_folder,
                                     kind="ghost", h=36)
         self.btn_browse.pack(side="left", padx=(0, K.u(8)))
+        # 「直接选择文件」：与文件夹入口并列，互不覆盖（选文件会切到文件模式）
+        self.btn_files = self._btn(row1, "选择文件…", self.pick_files,
+                                   kind="ghost", h=36)
+        self.btn_files.pack(side="left", padx=(0, K.u(8)))
         self.btn_run = self._btn(row1, "开始识别", self.start, kind="primary", h=36)
         self.btn_run.pack(side="left")
         self.btn_stop = self._btn(row1, "停止", self.stop, kind="danger", h=36)
@@ -245,6 +250,10 @@ class App:
                  text="自动递归处理所选文件夹及其全部子文件夹：每个含票据的目录"
                       "各自识别、各自生成 Excel 与「未识别」，识别中可随时「停止」"
                  ).pack(fill="x", pady=(K.u(6), 0))
+        tk.Label(c_folder.body, bg=sk.card, fg=sk.faint, font=K.f(9), anchor="w",
+                 text="也可「选择文件…」直接添加单个/多个文件：PDF 会在同级生成一个"
+                      "以该 PDF 命名的文件夹（逐页转图后识别），图片则按其所在目录处理"
+                 ).pack(fill="x", pady=(K.u(2), 0))
 
         # ── 统计卡行（4 张；⚠️ 必须显式给宽，否则互相抢宽被挤丢） ──
         srow = tk.Frame(root, bg=sk.bg)
@@ -381,6 +390,27 @@ class App:
         d = filedialog.askdirectory(title="选择票据所在文件夹（图片 / PDF）")
         if d:
             self.folder.set(d)
+            self.files = []
+            self.mode = "folder"
+            self.lbl_out.configure(text="")
+
+    def pick_files(self):
+        """「直接选择文件」：可多选；PDF 按同级同名文件夹展开，图片按其所在目录处理。"""
+        exts = " ".join("*" + e for e in sorted(IMG_EXTS))
+        picked = filedialog.askopenfilenames(
+            title="选择票据文件（可多选；PDF 将逐页转图后识别）",
+            filetypes=[("票据文件（PDF / 图片）", "*.pdf " + exts),
+                       ("PDF 文件", "*.pdf"),
+                       ("图片文件", exts),
+                       ("所有文件", "*.*")])
+        picked = [p for p in (picked or []) if os.path.isfile(p)]
+        if not picked:
+            return
+        self.files = picked
+        self.mode = "files"
+        names = "、".join(os.path.basename(p) for p in picked)
+        self.folder.set(names if len(names) <= 52 else names[:52] + "…")
+        self.lbl_out.configure(text="已选择 %d 个文件" % len(picked))
 
     def open_folder(self):
         d = self.work_dir or self.folder.get()
@@ -390,17 +420,31 @@ class App:
     def start(self):
         if self.running:
             return
-        folder = self.folder.get().strip()
-        if not folder or not os.path.isdir(folder):
-            messagebox.showwarning(APP_TITLE, "请先选择有效的文件夹")
-            return
         use_pdf = bool(self.var_pdf.get())
+        # src 既可能是文件夹路径（文件夹模式），也可能是已解析好的目标列表（文件模式）
+        if self.mode == "files" and self.files:
+            alive = [p for p in self.files if os.path.isfile(p)]
+            if not alive:
+                messagebox.showwarning(APP_TITLE, "所选文件都已不存在，请重新选择")
+                return
+            targets = file_targets(alive)
+            if not targets:
+                messagebox.showwarning(
+                    APP_TITLE, "所选文件里没有可处理的图片或 PDF 文件。")
+                return
+            self.root_dir = os.path.dirname(alive[0])
+            src = targets
+        else:
+            folder = self.folder.get().strip()
+            if not folder or not os.path.isdir(folder):
+                messagebox.showwarning(APP_TITLE, "请先选择有效的文件夹")
+                return
+            self.root_dir = folder
+            src = folder
         self.running = True
         self.records = []
         self.dir_results = []
-        self.root_dir = folder
         self.work_dir = None
-        self.cur_dir = "."
         self._stop.clear()
         self.btn_run.configure_state("disabled", "识别中…")
         self.btn_stop.configure_state("normal", "停止")
@@ -411,8 +455,9 @@ class App:
         self._update_stats()
         self.lbl_out.configure(text="")
         self._start_indet()
-        self.lbl_stat.configure(text="扫描子文件夹…")
-        threading.Thread(target=self._worker, args=(folder, use_pdf),
+        self.lbl_stat.configure(
+            text="准备文件…" if isinstance(src, list) else "扫描子文件夹…")
+        threading.Thread(target=self._worker, args=(src, use_pdf),
                          daemon=True).start()
 
     def stop(self):
@@ -423,29 +468,39 @@ class App:
         self.btn_stop.configure_state("disabled", "正在停止…")
         self.lbl_stat.configure(text="正在停止…（当前图片处理完即停）")
 
-    def _worker(self, folder, use_pdf):
+    def _worker(self, src, use_pdf):
+        # src 为字符串 = 文件夹模式（此处递归收集）；为 list = 文件模式（已解析好的目标）
         # ⚠️ 整体兜底：识别线程里任何未捕获异常（OCR 引擎加载失败、目录被删、
         #    磁盘错误…）若不回报，主界面会永远停在流动进度上，用户只能强杀进程。
         try:
-            all_dirs = collect_dirs(folder)
-            targets = [d for d in all_dirs if d["imgs"] or (use_pdf and d["pdfs"])]
-            if not all_dirs:
-                self.q.put(("warn", "该文件夹及其子文件夹里都没有找到图片或 PDF 文件。"))
-                return
-            if not targets:
-                self.q.put(("warn", "找到的 %d 个文件夹里只有 PDF，请勾选下面的"
-                                    "「自动把 PDF 转成图片」后再试。" % len(all_dirs)))
-                return
+            if isinstance(src, list):
+                targets = [d for d in src
+                           if d.get("kind") != "pdf" or use_pdf]
+                if not targets:
+                    self.q.put(("warn", "所选文件里没有可处理的图片；选中的 PDF 因为"
+                                        "「自动把 PDF 转成图片」未勾选而被跳过。"))
+                    return
+            else:
+                all_dirs = collect_dirs(src)
+                targets = [d for d in all_dirs
+                           if d["imgs"] or (use_pdf and d["pdfs"])]
+                if not all_dirs:
+                    self.q.put(("warn", "该文件夹及其子文件夹里都没有找到图片或 PDF 文件。"))
+                    return
+                if not targets:
+                    self.q.put(("warn", "找到的 %d 个文件夹里只有 PDF，请勾选下面的"
+                                        "「自动把 PDF 转成图片」后再试。" % len(all_dirs)))
+                    return
             self.q.put(("dirs", len(targets)))
             eng = None
             done_n = 0
             for di, d in enumerate(targets, 1):
                 if self._stop.is_set():
                     break
-                rel, path = d["rel"], d["path"]
+                rel = d["rel"]
                 self.q.put(("dir", di, len(targets), rel))
-                prep = prepare(path, enabled=use_pdf, cancel=self._stop.is_set,
-                               log=lambda m: self.q.put(("stage", m)))
+                prep = prepare_target(d, enabled=use_pdf, cancel=self._stop.is_set,
+                                      log=lambda m: self.q.put(("stage", m)))
                 work = prep["work_dir"]
                 try:
                     imgs = [f for f in sorted(os.listdir(work))
@@ -460,7 +515,6 @@ class App:
                         self.q.put(("stage", "加载识别引擎…"))
                         from rapidocr_onnxruntime import RapidOCR
                         eng = RapidOCR()
-                        self.eng = eng
                     for i, name in enumerate(imgs, 1):
                         if self._stop.is_set():
                             break
@@ -490,6 +544,9 @@ class App:
     def _poll(self):
         if self._closing:
             return
+        # 一轮 drain 里可能堆了成百上千条 row；统计卡每行都重算一遍纯属浪费
+        # （一次轮询内界面不会重绘，中间值无人看得见）→ 整轮结束只算一次。
+        touched = False
         try:
             while True:
                 msg = self.q.get_nowait()
@@ -511,14 +568,13 @@ class App:
                                              rec["seller"] or "—",
                                              len(rec["items"]) or "—", total,
                                              "成功" if rec["ok"] else "未识别"))
-                    self._update_stats()
+                    touched = True
                 elif kind == "stage":
                     self.lbl_stat.configure(text=str(msg[1])[:40])
                 elif kind == "dirs":
                     self.lbl_out.configure(text="共 %d 个文件夹待识别" % msg[1])
                 elif kind == "dir":
                     di, n, rel = msg[1], msg[2], msg[3]
-                    self.cur_dir = rel
                     self.lbl_stat.configure(
                         text=("[%d/%d] %s" % (di, n, dir_label(rel)))[:40])
                 elif kind == "prep":
@@ -547,6 +603,16 @@ class App:
                     self._recover(msg[1])
         except queue.Empty:
             pass
+        except Exception as e:  # noqa: BLE001
+            # ⚠️ 任何一条消息处理出错，都不能让轮询链断掉：链一断，界面就永远不再刷新，
+            #    而识别线程还在后台跑，用户只能强杀进程。这里吞掉异常并保底接上下一轮，
+            #    把原因写到底栏，至少留下线索。
+            try:
+                self.lbl_out.configure(text="界面刷新异常：%s" % str(e)[:48])
+            except Exception:  # noqa: BLE001
+                pass
+        if touched:
+            self._update_stats()
         self._poll_job = self.root.after(120, self._poll)
 
     def _recover(self, reason, soft=False):
@@ -615,6 +681,15 @@ class App:
                             sum(i["details"] for _d, i, _p in ex_rows),
                             format(sum(i["total"] for _d, i, _p in ex_rows), ",.2f")))
 
+        made = [d for d in self.dir_results if d["prep"].get("created")]
+        reused_dirs = [d for d in self.dir_results
+                       if d["prep"].get("new_dir")
+                       and d["prep"].get("created") is False]
+        if made or reused_dirs:
+            lines.append("")
+            lines.append("PDF 转图文件夹：新建 %d 个、复用已存在 %d 个"
+                         % (len(made), len(reused_dirs)))
+
         pre = [s for s in (prep_summary(d["prep"]) for d in self.dir_results) if s]
         if pre:
             lines.append("")
@@ -625,10 +700,25 @@ class App:
             lines.append("")
             lines.append("没有可识别图片的文件夹：%s"
                          % "、".join(dir_label(d["rel"]) for d in empty[:MAX_LIST_DIRS]))
+        why = [(d["rel"], d["prep"].get("reason")) for d in self.dir_results
+               if d["prep"].get("reason")]
+        if why:
+            lines.append("")
+            lines.append("未能处理的文件（原因）：")
+            for rel, r in why[:MAX_LIST_DIRS]:
+                lines.append("  · [%s] %s" % (dir_label(rel), r))
+        warns = [(d["rel"], m) for d in self.dir_results
+                 for m in (d["prep"].get("warn") or [])]
+        if warns:
+            lines.append("")
+            lines.append("提醒 %d 条：" % len(warns))
+            for rel, m in warns[:MAX_LIST_DIRS]:
+                lines.append("  · [%s] %s" % (dir_label(rel), m))
         bad = [(d["rel"], nm, r) for d in self.dir_results for nm, r in d["prep"]["failed"]]
         if bad:
             lines.append("")
-            lines.append("PDF 转换失败 %d 个（已归入各自的「%s」）：" % (len(bad), UNKNOWN_DIR))
+            lines.append("PDF 转换失败 %d 个（原件已复制到各自的「%s」待人工处理）："
+                         % (len(bad), UNKNOWN_DIR))
             for rel, nm, r in bad[:MAX_LIST_DIRS]:
                 lines.append("  · [%s] %s（%s）" % (dir_label(rel), nm, r))
 

@@ -18,6 +18,8 @@
     ① 加速镜像 ×3 —— 下载前并发探测量 256KB，按实测速度从快到慢
     ② GitHub Release 原站直链
     ③ 备用源直链                          —— 兜底
+下载途中若某个源「探速时快、跑起来掉速」，看门狗会在窗口期满后自动换到下一个源，
+并用 HTTP Range 从断点续传（已下载的字节一个不废）。
 
 update.json 由发版脚本 release.py 生成并随 Release 上传，字段：
     {"app","version","notes","url","fallback_url","release_url",
@@ -86,7 +88,9 @@ MIRROR_PREFIXES = (
 
 PROBE_BYTES = 256 * 1024        # 探测时最多读取的字节数
 PROBE_TIMEOUT = 4               # 单源探测最长等待秒数
-MIN_USEFUL_SPEED = 50 * 1024    # B/s：低于此速度视为「探不到」，排到最后但仍会尝试
+MIN_USEFUL_SPEED = 100 * 1024   # 探测门限：低于此值视为「病源」，降级到队尾
+SWITCH_SPEED = 50 * 1024        # 下载中看门狗门限：连续 WATCHDOG_WINDOW 秒低于此值就换源续传
+WATCHDOG_WINDOW = 8.0           # 看门狗观察窗（秒）——窗口内平均速度低于门限才判定「掉速」
 
 # ---------------- 本工具专属配置（换工具只改这一段） ----------------
 APP_KEY = "ocr"
@@ -300,6 +304,33 @@ def _save_auto_update(config_file, enabled):
     except Exception:  # noqa: BLE001
         pass
 
+def _load_cleanup_old(config_file):
+    """读上次的选择；没有记录 / 读不出来 → True（默认删旧版，与最初行为一致）。"""
+    try:
+        with open(config_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return bool(data.get("cleanup_old", True))
+    except Exception:
+        return True
+
+
+def _save_cleanup_old(config_file, enabled):
+    """记住勾选状态。失败静默 —— 只是下次弹窗的默认值，不值得因此打断更新。"""
+    try:
+        data = {}
+        if config_file and os.path.exists(config_file):
+            try:
+                with open(config_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except Exception:
+                data = {}
+        data["cleanup_old"] = bool(enabled)
+        os.makedirs(os.path.dirname(config_file) or ".", exist_ok=True)
+        with open(config_file, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
 
 # ---------------- 取更新信息（双源 + 兜底） ----------------
 def _get_json(url, timeout=8):
@@ -480,7 +511,7 @@ def _old_version_pattern(base_stem, ext):
     )
 
 
-def cleanup_old_versions(log_fn=None, max_wait=8.0):
+def cleanup_old_versions(log_fn=None, max_wait=8.0, cleanup_old=None):
     """删除程序目录里遗留的「旧版 / 更新中」文件。只在打包运行时生效。"""
     if not _is_frozen():
         return []
@@ -488,15 +519,21 @@ def cleanup_old_versions(log_fn=None, max_wait=8.0):
         current = os.path.abspath(sys.executable)
     except Exception:  # noqa: BLE001
         return []
+    if cleanup_old is None:
+        cleanup_old = read_and_consume_cleanup_flag(os.path.dirname(current))
     return _purge(directory=os.path.dirname(current), current=current,
-                  log_fn=log_fn, max_wait=max_wait)
+                  log_fn=log_fn, max_wait=max_wait, cleanup_old=cleanup_old)
 
 
-def _purge(directory, current, log_fn=None, max_wait=8.0):
+def _purge(directory, current, log_fn=None, max_wait=8.0,
+           cleanup_old=True):
     """删除 directory 下所有「本程序旧版/中间」文件（排除 current）。"""
     stem, ext = os.path.splitext(os.path.basename(current))
     pat = _old_version_pattern(_base_stem(stem), ext)
 
+    # ⚠️ _scan 必须定义在下面「保留旧版」分支**之前**：那个分支也要用它列出残留清单。
+    #    曾经定义在后面，调用时抛 UnboundLocalError，被宽 except 吞掉 →
+    #    「保留旧版」日志永远显示「无旧版残留」，用户以为机制没生效。
     def _scan():
         found = []
         try:
@@ -507,6 +544,20 @@ def _purge(directory, current, log_fn=None, max_wait=8.0):
         except OSError:
             pass
         return found
+
+    if not cleanup_old:
+        # 用户明确要求保留旧版本 → 一个字节都不删，只如实告知留下了什么
+        try:
+            kept = [os.path.basename(p) for p in _scan()]
+        except Exception:  # noqa: BLE001
+            kept = []
+        if log_fn:
+            try:
+                log_fn("已保留旧版本文件（未勾选自动删除）：%s"
+                       % ("、".join(kept) if kept else "当前目录无旧版残留"))
+            except Exception:  # noqa: BLE001
+                pass
+        return []
 
     removed, deadline = [], time.time() + max_wait
     while True:
@@ -527,6 +578,47 @@ def _purge(directory, current, log_fn=None, max_wait=8.0):
         except Exception:  # noqa: BLE001
             pass
     return removed
+
+
+# ------------------------------------------------- 「更新后删除旧版」跨进程传递
+# 复选框在**旧版进程**里勾，而删除动作发生在**新版进程**的 settle_after_update()，
+# 两个进程没有共享内存，只能靠程序目录下的一个文件把选择传过去。
+_CLEANUP_FLAG = "_更新保留旧版.flag"
+
+
+def write_cleanup_flag(directory, cleanup_old):
+    """旧版进程：把用户的选择写进程序目录，供新版启动时读取。"""
+    if not directory:
+        return False
+    try:
+        with open(os.path.join(directory, _CLEANUP_FLAG), "w", encoding="utf-8") as f:
+            f.write("cleanup_old=%s" % ("1" if cleanup_old else "0"))
+        return True
+    except OSError:
+        return False
+
+
+def read_and_consume_cleanup_flag(directory):
+    """新版进程：读取旧版留下的选择并删掉标记文件。
+
+    返回 True/False 表示要不要删旧版；**文件不存在时返回 True**（默认保持原行为，
+    不因为机制故障就悄悄改成「保留一堆旧版文件」）。
+    必须「读完就删」：它表达的是「本次更新」的意图，留着会被下次启动反复生效。
+    """
+    path = os.path.join(directory or "", _CLEANUP_FLAG)
+    try:
+        if not os.path.exists(path):
+            return True
+        with open(path, "r", encoding="utf-8") as f:
+            txt = f.read()
+    except OSError:
+        return True
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    return "cleanup_old=0" not in txt.replace(" ", "")
 
 
 # ---------------------------------------------------------------- 待改名登记
@@ -598,7 +690,7 @@ def apply_pending_rename(log_fn=None):
         return False
 
 
-def settle_after_update(log_fn=None):
+def settle_after_update(log_fn=None, cleanup_old=None):
     # ⚠️ 绝不在这里改自己的名字 —— 见上方铁律。只登记，退出时由 atexit 执行。
     """程序启动时调用：接管原文件名，并清掉更新过程留下的旧版文件。
 
@@ -626,6 +718,10 @@ def settle_after_update(log_fn=None):
 
     global _PENDING_RENAME, _RENAME_HOOKED, _PENDING_LOG_FN
     directory = os.path.dirname(current)
+
+    # 清理策略：没显式传就读旧版进程留下的标记文件（用户勾了什么）
+    if cleanup_old is None:
+        cleanup_old = read_and_consume_cleanup_flag(directory)
     stem, ext = os.path.splitext(os.path.basename(current))
     base = _base_stem(stem)
     final = os.path.join(directory, base + ext)
@@ -651,10 +747,11 @@ def settle_after_update(log_fn=None):
              % os.path.basename(final))
 
     # ② 清掉所有旧版/中间残留（含刚被挪开的那份，旧进程退出后即可删除）
-    return _purge(directory, current, log_fn=log_fn, max_wait=12.0)
+    return _purge(directory, current, log_fn=log_fn, max_wait=12.0,
+                  cleanup_old=cleanup_old)
 
 
-def windows_replace_and_restart(new_exe_path, log_fn=None):
+def windows_replace_and_restart(new_exe_path, log_fn=None, cleanup_old=True):
     """就地更新：把下载好的新 exe 放进程序目录，启动它，本进程退出。
 
     步骤（全在本进程内完成，不生成任何外部脚本、不做进程退出轮询）：
@@ -703,6 +800,12 @@ def windows_replace_and_restart(new_exe_path, log_fn=None):
             raise RuntimeError("无法把新版本写入程序目录（%s）：%s" % (directory, e))
     _log("新版本已放入程序目录：%s" % os.path.basename(staging))
 
+    # 把「删不删旧版本」写进标记文件 —— 新版进程读不到本进程的变量，
+    # 只能靠文件跨进程传递。必须在启动新版**之前**写好。
+    if write_cleanup_flag(directory, cleanup_old):
+        _log("旧版本文件处理方式已传给新版本：%s"
+             % ("更新完成后自动删除" if cleanup_old else "保留旧版本文件"))
+
     # ② 启动新版。用中间名（而非原文件名）启动：Windows 不允许在「当前进程自己的
     #    映像路径」上启动新进程，用原名会静默失败（引导器起来、真实程序起不来）。
     started = False
@@ -744,7 +847,7 @@ def _center_on(master, w, h):
 # ---------------- 主入口 ----------------
 def run_update_check(parent, app_name, current_version, config_file=None,
                      install_helper=None, log_fn=None, manual=False,
-                     on_before_install=None):
+                     on_before_install=None, cleanup_old=None):
     """启动检查（后台线程）。manual=True 时失败/无更新也弹提示，且忽略 auto_update 开关。
 
     on_before_install: 可选回调。新版本已就位、程序即将退出前调用，
@@ -795,6 +898,9 @@ def run_update_check(parent, app_name, current_version, config_file=None,
             html_url=info.get("html_url", ""), sha256=info.get("sha256", ""),
             config_file=config_file, install_helper=install_helper, log_fn=log_fn,
             on_before_install=on_before_install,
+        cleanup_old_default=(_load_cleanup_old(config_file)
+                                 if cleanup_old is None
+                                 else bool(cleanup_old)),
         ))
 
     threading.Thread(target=_worker, daemon=True).start()
@@ -804,7 +910,8 @@ def run_update_check(parent, app_name, current_version, config_file=None,
 class UpdateDialog(tk.Toplevel):
     def __init__(self, master, app_name, current_version, tag, notes,
                  download_urls, config_file, install_helper, html_url="",
-                 sha256="", log_fn=None, on_before_install=None):
+                 sha256="", log_fn=None, on_before_install=None,
+                 cleanup_old_default=True):
         super().__init__(master)
         self.title("发现新版本 · %s" % app_name)
         self.configure(bg="#f4f6f8")
@@ -849,6 +956,16 @@ class UpdateDialog(tk.Toplevel):
                 wraplength=520, justify="left",
             ).pack(anchor="w", pady=(0, 6))
 
+        # 「更新后是否删除旧版本文件」：默认勾选（= 保持旧行为）。
+        # 取消勾选时旧版本 exe 会保留在程序目录里（可用来回退）。
+        # 放在按钮**上方**：它是本次更新的前置选择，与「立即更新」同属一个决策区；
+        # 放到按钮下面会紧贴窗口底边，看起来像按钮的副标题。
+        self._keep_old = tk.BooleanVar(value=cleanup_old_default)
+        ttk.Checkbutton(
+            frm, text="更新后自动删除旧版本文件（取消勾选则保留旧版，便于回退）",
+            variable=self._keep_old,
+        ).pack(anchor="w", pady=(0, 8))
+
         btns = ttk.Frame(frm)
         btns.pack(fill="x", pady=(4, 0))
         # 统一按钮样式：主按钮蓝色实底 + 白字加粗，次按钮浅灰 + 深字常规，
@@ -886,13 +1003,25 @@ class UpdateDialog(tk.Toplevel):
         self.destroy()
 
     def _on_update(self):
+        cleanup_old = bool(self._keep_old.get())
+        # 记住这次选择，下次弹窗用同样的默认值（写配置失败不影响更新本身）
+        _save_cleanup_old(self._config_file, cleanup_old)
+        if self._log_fn:
+            try:
+                self._log_fn("旧版本文件处理方式：%s"
+                             % ("更新完成后自动删除" if cleanup_old
+                                else "保留旧版本文件（用户取消了勾选）"))
+            except Exception:
+                pass
         self._close()
         DownloadProgressDialog(
             self.master, app_name=self._app_name,
             download_urls=self._download_urls, sha256=self._sha256,
             install_helper=self._install_helper, log_fn=self._log_fn,
             on_before_install=self._on_before_install,
+        cleanup_old=cleanup_old,
         )
+
 
     def _on_open_page(self):
         """安装版：不自动替换，直接打开下载页（服务器站点，国内快）。"""
@@ -929,13 +1058,21 @@ class UpdateDialog(tk.Toplevel):
 
 
 # ---------------- 下载进度对话框（速度 / 进度 / 取消） ----------------
+class _SwitchedSource(Exception):
+    """主动换源（不是失败）：当前源速度长期过低，已下载字节保留给下一个源续传。
+
+    单独立一个异常类型，是为了让 `_worker` 能把「正常调度」与「真失败」分开：
+    真失败要清空临时文件从头下，换源则必须保留已下载的部分。
+    """
+
+
 class DownloadProgressDialog(tk.Toplevel):
     """共享状态 + UI 轮询模式：下载线程只写 _state，UI 每 150ms 刷新，不积压。"""
 
     POLL_MS = 150
 
     def __init__(self, master, app_name, download_urls, install_helper, sha256="",
-                 log_fn=None, on_before_install=None):
+                 log_fn=None, on_before_install=None, cleanup_old=True):
         super().__init__(master)
         self.title("正在下载更新 · %s" % app_name)
         self.configure(bg="#f4f6f8")
@@ -951,6 +1088,8 @@ class DownloadProgressDialog(tk.Toplevel):
         self._sha256 = sha256
         self._log_fn = log_fn
         self._on_before_install = on_before_install
+        self._cleanup_old = bool(cleanup_old)
+        self._has_spare = False      # 当前源之后是否还有备选（决定要不要触发换源）
 
         self._cancel_evt = threading.Event()
         self._state = {"done": 0, "total": 0, "running": True,
@@ -988,6 +1127,51 @@ class DownloadProgressDialog(tk.Toplevel):
         self.after(self.POLL_MS, self._poll)
 
     # ---- 下载线程 ----
+    def _download_one(self, url, tmp, done, st):
+        """从单个源下载（done>0 时用 Range 断点续传）。返回累计已下载字节数。
+
+        速度长期过低且还有备选源时抛 _SwitchedSource —— **不是失败**，
+        已下载的字节会原样保留，交给下一个源接着下。
+        """
+        headers = {"User-Agent": UA, "Accept": "*/*"}
+        if done > 0:
+            headers["Range"] = "bytes=%d-" % done
+        req = urllib.request.Request(url, headers=headers, method="GET")
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            status = getattr(resp, "status", 200)
+            if done > 0 and status != 206:
+                # 该源不支持断点续传（或忽略了 Range）→ 只能从头下
+                done = 0
+                st["done"] = 0
+            try:
+                total = int(resp.headers.get("Content-Length", 0) or 0)
+            except (TypeError, ValueError):
+                total = 0
+            if total:
+                st["total"] = total + done if status == 206 else total
+            mode = "ab" if (done > 0 and status == 206) else "wb"
+            win_t0, win_bytes = time.monotonic(), 0
+            with open(tmp, mode) as f:
+                while True:
+                    if self._cancel_evt.is_set():
+                        raise IOError("cancelled")
+                    buf = resp.read(65536)
+                    if not buf:
+                        break
+                    f.write(buf)
+                    done += len(buf)
+                    win_bytes += len(buf)
+                    st["done"] = done
+                    # 换源看门狗：观察窗期满仍低于门限 → 主动换源续传
+                    elapsed = time.monotonic() - win_t0
+                    if elapsed >= WATCHDOG_WINDOW:
+                        if win_bytes / elapsed < SWITCH_SPEED and self._has_spare:
+                            raise _SwitchedSource(
+                                "%s 速度仅 %.0fKB/s，换源续传"
+                                % (_source_label(url), win_bytes / 1024 / elapsed))
+                        win_t0, win_bytes = time.monotonic(), 0
+        return done
+
     def _worker(self):
         st = self._state
         tmp = os.path.join(tempfile.gettempdir(),
@@ -1001,37 +1185,22 @@ class DownloadProgressDialog(tk.Toplevel):
         except Exception:  # noqa: BLE001
             pass        # 择优本身失败就用原顺序，绝不能因此让更新走不下去
         # 多源依次尝试：加速镜像（快→慢）→ GitHub 原站 → 备用源
+        done = 0
         for idx, url in enumerate(self._urls, 1):
             if self._cancel_evt.is_set():
                 break
+            self._has_spare = idx < len(self._urls)
             try:
-                st["done"] = 0
-                st["total"] = 0
                 self._set_title("正在下载…（源 %d/%d：%s）"
                                 % (idx, len(self._urls), _source_label(url)))
-                req = urllib.request.Request(
-                    url, headers={"User-Agent": UA, "Accept": "*/*"}, method="GET")
-                with urllib.request.urlopen(req, timeout=30) as resp:
-                    try:
-                        total = int(resp.headers.get("Content-Length", 0) or 0)
-                    except (TypeError, ValueError):
-                        total = 0
-                    st["total"] = total
-                    done = 0
-                    with open(tmp, "wb") as f:
-                        while True:
-                            if self._cancel_evt.is_set():
-                                raise IOError("cancelled")
-                            buf = resp.read(65536)
-                            if not buf:
-                                break
-                            f.write(buf)
-                            done += len(buf)
-                            st["done"] = done
+                done = self._download_one(url, tmp, done, st)
                 if self._cancel_evt.is_set():
                     raise IOError("cancelled")
-                if total and done != total:
-                    raise IOError("下载不完整（%d / %d 字节）" % (done, total))
+                if done <= 0:
+                    raise IOError("未收到数据")
+                want = st.get("total") or 0
+                if want and done < want:
+                    raise IOError("下载不完整（%d / %d 字节）" % (done, want))
                 if os.path.getsize(tmp) < 100000:
                     raise IOError("下载文件过小，疑似失败")
                 if self._sha256 and not self._verify_sha256(tmp, self._sha256):
@@ -1039,10 +1208,22 @@ class DownloadProgressDialog(tk.Toplevel):
                 st["result"] = tmp
                 st["running"] = False
                 return
+            except _SwitchedSource as e:
+                # 主动换源：保留已下载字节，下个源用 Range 续传
+                last_err = e
+                if self._log_fn:
+                    try:
+                        self._log_fn("下载换源：%s" % e)
+                    except Exception:  # noqa: BLE001
+                        pass
+                continue
             except Exception as e:  # noqa: BLE001
                 if self._cancel_evt.is_set():
                     break
                 last_err = e
+                # 数据可能已损坏/不完整 → 清掉重来，不做跨源续传
+                done = 0
+                st["done"] = 0
                 try:
                     if os.path.exists(tmp):
                         os.remove(tmp)
@@ -1124,7 +1305,13 @@ class DownloadProgressDialog(tk.Toplevel):
         except Exception:  # noqa: BLE001
             pass
         self.destroy()
+        # 临时文件名在这里统一算一次：下面「取消」与「失败」两条分支都要用它清理残件。
+        # （曾把它只写在 cancelled 分支里，失败分支引用未定义变量 → NameError 把弹窗吃掉）
+        tmp = os.path.join(
+            tempfile.gettempdir(),
+            "%s_更新.exe" % re.sub(r"\W+", "_", self._app_name))
         if cancelled:
+            self._discard_partial(tmp)
             if self._log_fn:
                 try:
                     self._log_fn("已取消更新下载。")
@@ -1132,6 +1319,7 @@ class DownloadProgressDialog(tk.Toplevel):
                     pass
             return
         if error is not None:
+            self._discard_partial(tmp)
             messagebox.showerror("更新失败", "下载新版本失败：%s" % error)
             if self._log_fn:
                 try:
@@ -1141,7 +1329,7 @@ class DownloadProgressDialog(tk.Toplevel):
             return
         # 成功 → 交给宿主安装（默认：就地落位 + 启动新版）
         try:
-            self._install_helper(done_path, self._log_fn)
+            self._call_install_helper(done_path)
         except Exception as e:  # noqa: BLE001
             messagebox.showerror("更新失败", "更新未完成：%s" % e)
             return
@@ -1153,6 +1341,44 @@ class DownloadProgressDialog(tk.Toplevel):
         except Exception:  # noqa: BLE001
             pass
         self._exit_app()
+
+    def _discard_partial(self, path):
+        """删掉没下完的临时 exe。失败静默（清理是尽力而为，绝不能因此再报错）。"""
+        try:
+            if path and os.path.exists(path):
+                os.remove(path)
+                if self._log_fn:
+                    try:
+                        self._log_fn("已清理未完成的临时更新文件：%s"
+                                     % os.path.basename(path))
+                    except Exception:
+                        pass
+        except OSError:
+            pass
+
+    def _call_install_helper(self, done_path):
+        """调用宿主给的安装函数，并带上 cleanup_old。
+
+        为什么要这么啰嗦：install_helper 是开放给宿主的回调，**可能有项目还在用
+        只接受 2 个位置参数的老签名**。直接多传关键字会让它抛 TypeError → 用户看到
+        「更新未完成」，可文件其实已经下好了，比不做还糟。所以先按新签名试，
+        被拒绝就退回老签名，并补写标记文件让新版仍能拿到用户的选择。
+        """
+        try:
+            self._install_helper(done_path, self._log_fn,
+                                 cleanup_old=self._cleanup_old)
+            return
+        except TypeError as e:
+            # 只在「参数不匹配」时退回；安装逻辑内部的 TypeError 必须暴露出来
+            if "cleanup_old" not in str(e):
+                raise
+            if not self._cleanup_old:
+                try:
+                    write_cleanup_flag(
+                        os.path.dirname(os.path.abspath(sys.executable)), False)
+                except Exception:
+                    pass
+        self._install_helper(done_path, self._log_fn)
 
     def _exit_app(self):
         """关闭主窗口并结束进程。
