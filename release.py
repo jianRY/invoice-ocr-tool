@@ -558,8 +558,7 @@ def verify_page(ver, wait=180):
     log("校验线上展示页（最多等 %ds）…" % wait)
     while time.time() - t0 < wait:
         try:
-            proxy = urllib.request.ProxyHandler({"http": PROXY, "https": PROXY})
-            op = urllib.request.build_opener(proxy)
+            op = gh_opener()
             req = urllib.request.Request(
                 url + "?nocache=%d" % int(time.time()),
                 headers={"User-Agent": "curl/8", "Cache-Control": "no-cache"})
@@ -647,9 +646,22 @@ def get_token():
     raise SystemExit("拿不到 GitHub token")
 
 
+def gh_opener():
+    """构造访问 GitHub 的 opener：PROXY 有值走代理，None 走直连。
+
+    ⚠️⚠️ 直连必须传**空字典** `ProxyHandler({})`。曾写成
+    `ProxyHandler({"http": PROXY, "https": PROXY})`，PROXY 为 None 时字典值是 None，
+    urllib 会拿 None 去 _parse_proxy 解析，抛
+    `TypeError: expected string or bytes-like object, got 'NoneType'`。
+    症状极具迷惑性：打包/签名/git 推送全部成功，**只有 GitHub API 这一步崩**。
+    """
+    p = PROXY
+    return urllib.request.build_opener(
+        urllib.request.ProxyHandler({"http": p, "https": p} if p else {}))
+
+
 def api(path, token, data=None, method=None, timeout=120):
-    proxy = urllib.request.ProxyHandler({"http": PROXY, "https": PROXY})
-    op = urllib.request.build_opener(proxy)
+    op = gh_opener()
     h = {"Authorization": "Bearer " + token, "User-Agent": "curl/8",
          "Accept": "application/vnd.github+json"}
     body = None
@@ -700,8 +712,7 @@ def upload_asset(token, rid, path, name):
                 log("  已删除同名旧资产 %s" % name)
     except Exception as e:
         log("  同名资产检查失败（忽略）：%s" % e)
-    proxy = urllib.request.ProxyHandler({"http": PROXY, "https": PROXY})
-    op = urllib.request.build_opener(proxy)
+    op = gh_opener()
     with open(path, "rb") as f:
         blob = f.read()
     url = "https://uploads.github.com/repos/%s/releases/%s/assets?name=%s" % (OWNER_REPO, rid, name)
